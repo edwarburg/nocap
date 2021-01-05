@@ -4,13 +4,9 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::{Hash, Hasher};
 
-use crate::ast;
-use crate::ast::TypeExpr;
 use crate::capabilities::CapabilityExpr;
 use crate::ty::Ty;
-use crate::type_check::{
-    AssignabilityJudgment, Assignable, Identifiable, Name, TypeContext, TypeError,
-};
+use crate::type_check::{AssignabilityJudgment, Assignable, Identifiable, Name};
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
 pub struct TypeParameterDeclaration {

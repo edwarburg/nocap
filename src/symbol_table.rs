@@ -27,6 +27,7 @@ impl<K: Eq + Hash, V> Default for SymbolTable<K, V> {
 /// perform `$action` inside of a freshly pushed frame with opacity `$opacity`.
 macro_rules! with_frame {
     ($symbol_table:expr, $opacity:expr, $action:expr) => {{
+        // TODO want to use scope_guard to ensure pop_frame() gets called, but it doesn't work when $symbol_table and $action both mutably borrow `self`.
         ($symbol_table).push_frame($opacity);
         let result = $action;
         ($symbol_table).pop_frame();

@@ -1,3 +1,6 @@
+// TODO remove, lots of stuff in flux right now and tired of unused field warnings...
+#![allow(dead_code)]
+
 mod ast;
 mod capabilities;
 #[macro_use]

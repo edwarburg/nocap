@@ -1,9 +1,11 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::ast::{AstNode, AstNodeKind, AstRef, FunctionImplementation, Ident, LVal, TypeExpr};
+use crate::ast;
+use crate::ast::{AstNode, Expr, ExprKind, FunctionImplementation, Ident, Stmt, StmtKind, R};
 use crate::capabilities::{CapabilityDeclaration, CapabilityExpr};
 use crate::symbol_table::{Opacity, SymbolTable};
+
 use crate::ty::Ty;
 use crate::type_check::AssignabilityJudgment::NotAssignable;
 use crate::type_constructors::TypeConstructor;
@@ -337,25 +339,26 @@ struct TypeChecker<'tc> {
 type Env<'tc> = Rc<Environment<'tc>>;
 
 impl<'tc> TypeChecker<'tc> {
-    pub fn check(&mut self, ast_ref: AstRef) -> TypingJudgment<'tc> {
-        let initial_env = Rc::new(Environment::new());
-        self.check_node(&*ast_ref, initial_env)
-    }
-
     fn check_func_impl(
         &mut self,
         func_impl: &FunctionImplementation,
         env: Env<'tc>,
     ) -> TypingJudgment<'tc> {
-        self.check_node(&func_impl.body, env)
+        self.check_expr(&func_impl.body, env)
     }
 
-    fn check_node(&mut self, node: &AstNode, env: Env<'tc>) -> TypingJudgment<'tc> {
-        match &node.kind {
-            AstNodeKind::VarRef(ident) => self.check_var_ref(ident, env),
-            AstNodeKind::VarDecl(lhs, ty, rhs) => self.check_assign(lhs, ty, rhs, env),
-            AstNodeKind::Block(exprs) => self.check_block(exprs, env),
-            _ => unimplemented!("haven't implemented type checking for {}", node),
+    fn check_stmt(&mut self, stmt: &Stmt, env: Env<'tc>) -> TypingJudgment<'tc> {
+        match &stmt.kind() {
+            StmtKind::VarDecl(lhs, ty, rhs) => self.check_var_decl(lhs, ty, rhs, env),
+            _ => unimplemented!("haven't implemented type checking for {:#?}", stmt),
+        }
+    }
+
+    fn check_expr(&mut self, expr: &Expr, env: Env<'tc>) -> TypingJudgment<'tc> {
+        match &expr.kind {
+            ExprKind::VarRef(ident) => self.check_var_ref(ident, env),
+            ExprKind::Block(stmts, expr) => self.check_block(stmts, expr, env),
+            _ => unimplemented!("haven't implemented type checking for {:#?}", expr),
         }
     }
 
@@ -375,15 +378,15 @@ impl<'tc> TypeChecker<'tc> {
             )
     }
 
-    fn check_assign(
+    fn check_var_decl(
         &mut self,
         lhs: &Ident,
-        ty: &TypeExpr,
-        rhs: &AstNode,
+        ty: &ast::Ty,
+        rhs: &Expr,
         env: Env<'tc>,
     ) -> TypingJudgment<'tc> {
-        self.check_node(rhs, env).and_then(|rhs_ty, env| {
-            let ty = ty_try!(env, Ty::from_type_expr(ty, self.type_context));
+        self.check_expr(rhs, env).and_then(|rhs_ty, env| {
+            let ty = ty_try!(env, Ty::from_ast(ty, self.type_context));
             if let NotAssignable { reason } = rhs_ty.assignable_to(ty) {
                 return TypingJudgment::TypeError(reason, env);
             }
@@ -399,30 +402,29 @@ impl<'tc> TypeChecker<'tc> {
         })
     }
 
-    fn check_block(&mut self, exprs: &Vec<AstRef>, env: Env<'tc>) -> TypingJudgment<'tc> {
-        match exprs.split_last() {
-            Some((last, others)) => {
-                let outer_env = env.clone();
-                let mut curr_env = env.clone();
-                let block_tj =
-                    with_frame!(&mut self.local_context.symbols, Opacity::Transparent, {
-                        for expr in others.iter() {
-                            tj_try!(self.check_node(expr, curr_env.clone()), _ty, next_env, {
-                                curr_env = next_env.clone();
-                            });
-                        }
-                        self.check_node(last, curr_env.clone())
-                    });
-                tj_try!(block_tj, last_expr_ty, last_expr_env, {
-                    let outgoing_env = last_expr_env.preserving_refinements_of_outer_vars(
-                        outer_env.clone(),
-                        self.local_context.symbols.depth(),
-                    );
-                    TypingJudgment::WellTyped(last_expr_ty, outgoing_env)
-                })
+    fn check_block(
+        &mut self,
+        stmts: &Vec<R<Stmt>>,
+        expr: &R<Expr>,
+        env: Env<'tc>,
+    ) -> TypingJudgment<'tc> {
+        let outer_env = env.clone();
+        let mut curr_env = env.clone();
+        let block_tj = with_frame!(&mut self.local_context.symbols, Opacity::Transparent, {
+            for stmt in stmts.iter() {
+                tj_try!(self.check_stmt(stmt, curr_env.clone()), _ty, next_env, {
+                    curr_env = next_env.clone();
+                });
             }
-            None => TypingJudgment::TypeError("block has nothing in it".to_owned(), env.clone()),
-        }
+            self.check_expr(expr, curr_env.clone())
+        });
+        tj_try!(block_tj, last_expr_ty, last_expr_env, {
+            let outgoing_env = last_expr_env.preserving_refinements_of_outer_vars(
+                outer_env.clone(),
+                self.local_context.symbols.depth(),
+            );
+            TypingJudgment::WellTyped(last_expr_ty, outgoing_env)
+        })
     }
 }
 
@@ -550,5 +552,5 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test() {}
+    fn test_invoke_adds_cap() {}
 }

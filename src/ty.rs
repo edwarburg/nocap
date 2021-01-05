@@ -1,5 +1,5 @@
 use crate::ast;
-use crate::ast::TypeExpr;
+use crate::ast::AstNode;
 use crate::type_check::{AssignabilityJudgment, Assignable, Name, TypeContext, TypeError};
 use crate::type_constructors::TypeConstructorInvocation;
 use core::fmt;
@@ -16,13 +16,13 @@ pub enum Ty<'tc> {
 }
 
 impl<'tc> Ty<'tc> {
-    pub fn from_type_expr(
-        expr: &ast::TypeExpr,
+    pub fn from_ast(
+        expr: &ast::Ty,
         type_context: &'tc TypeContext<'tc>,
     ) -> Result<&'tc Ty<'tc>, TypeError> {
-        match expr {
-            TypeExpr::Variable(v) => Ok(type_context.intern_ty(Ty::Variable(v.name))),
-            TypeExpr::TyConstInv(tci) => {
+        match &expr.kind() {
+            ast::TyKind::TyVar(v) => Ok(type_context.intern_ty(Ty::Variable(v.name))),
+            ast::TyKind::TyConstInv(tci) => {
                 let constructor = type_context
                     .lookup_type_constructor(tci.constructor.name)
                     .ok_or_else(|| format!("No type constructor named {}", tci.constructor.name))?;
