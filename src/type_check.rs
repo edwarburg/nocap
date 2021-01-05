@@ -377,33 +377,26 @@ impl<'tc> TypeChecker<'tc> {
 
     fn check_assign(
         &mut self,
-        lhs: &AstNode,
+        lhs: &Ident,
         ty: &TypeExpr,
         rhs: &AstNode,
         env: Env<'tc>,
     ) -> TypingJudgment<'tc> {
-        self.check_node(rhs, env)
-            .and_then(|rhs_ty, env| match &lhs.kind {
-                AstNodeKind::LVal(lval) => match lval {
-                    LVal::Variable(name) => {
-                        let ty = ty_try!(env, Ty::from_type_expr(ty, self.type_context));
-                        if let NotAssignable { reason } = rhs_ty.assignable_to(ty) {
-                            return TypingJudgment::TypeError(reason, env);
-                        }
-                        self.local_context.symbols.bind(
-                            name.name,
-                            ScopedVar {
-                                name: name.name,
-                                depth: self.local_context.symbols.depth(),
-                            },
-                        );
-                        let new_env =
-                            env.refine(self.local_context.symbols.lookup(&name.name).unwrap(), ty);
-                        TypingJudgment::WellTyped(ty, new_env)
-                    }
+        self.check_node(rhs, env).and_then(|rhs_ty, env| {
+            let ty = ty_try!(env, Ty::from_type_expr(ty, self.type_context));
+            if let NotAssignable { reason } = rhs_ty.assignable_to(ty) {
+                return TypingJudgment::TypeError(reason, env);
+            }
+            self.local_context.symbols.bind(
+                lhs.name,
+                ScopedVar {
+                    name: lhs.name,
+                    depth: self.local_context.symbols.depth(),
                 },
-                _ => TypingJudgment::TypeError(format!("not an lval: {}", lhs), env),
-            })
+            );
+            let new_env = env.refine(self.local_context.symbols.lookup(&lhs.name).unwrap(), ty);
+            TypingJudgment::WellTyped(ty, new_env)
+        })
     }
 
     fn check_block(&mut self, exprs: &Vec<AstRef>, env: Env<'tc>) -> TypingJudgment<'tc> {
