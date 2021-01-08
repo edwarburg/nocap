@@ -1,7 +1,12 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::type_check::{AssignabilityJudgment, Assignable, Identifiable, Name};
+use crate::ast;
+use crate::ast::{Cap, CapKind};
+use crate::ty::FromAst;
+use crate::type_check::{
+    AssignabilityJudgment, Assignable, Identifiable, Name, TypeContext, TypeError,
+};
 
 /// Declaration of a capability
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
@@ -33,6 +38,31 @@ pub enum CapabilityExpr<'tc> {
     Cap(&'tc CapabilityDeclaration),
     And(&'tc CapabilityExpr<'tc>, &'tc CapabilityExpr<'tc>),
     Or(&'tc CapabilityExpr<'tc>, &'tc CapabilityExpr<'tc>),
+}
+
+impl<'tc> FromAst<'tc, ast::Cap> for CapabilityExpr<'tc> {
+    type Output = &'tc CapabilityExpr<'tc>;
+
+    fn from_ast(ast: &Cap, type_context: &'tc TypeContext<'tc>) -> Result<Self::Output, TypeError> {
+        Ok(type_context.intern_cap_expr(match &ast.kind {
+            CapKind::CapRef(cap) => {
+                // TODO or should this be a lookup of an existing cap decl?
+                CapabilityExpr::Cap(
+                    type_context.intern_cap_decl(CapabilityDeclaration { name: cap.name }),
+                )
+            }
+            CapKind::And(lhs, rhs) => {
+                let lhs = CapabilityExpr::from_ast(lhs, type_context)?;
+                let rhs = CapabilityExpr::from_ast(rhs, type_context)?;
+                CapabilityExpr::And(lhs, rhs)
+            }
+            CapKind::Or(lhs, rhs) => {
+                let lhs = CapabilityExpr::from_ast(lhs, type_context)?;
+                let rhs = CapabilityExpr::from_ast(rhs, type_context)?;
+                CapabilityExpr::Or(lhs, rhs)
+            }
+        }))
+    }
 }
 
 impl Display for CapabilityExpr<'_> {

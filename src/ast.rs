@@ -273,7 +273,7 @@ node_impls!(Ty, TyKind);
 pub struct TypeConstructorInvocation {
     pub constructor: Ident,
     pub actual_type_parameters: Vec<R<Ty>>,
-    pub capabilities: Vec<R<Cap>>,
+    pub capabilities: Option<R<Cap>>,
 }
 
 impl TypeConstructorInvocation {
@@ -281,7 +281,7 @@ impl TypeConstructorInvocation {
         TypeConstructorInvocation {
             constructor,
             actual_type_parameters: Vec::new(),
-            capabilities: Vec::new(),
+            capabilities: None,
         }
     }
 }
@@ -401,6 +401,23 @@ pub(crate) mod test_utils {
         ast::TyKind::TyConstInv(ast::TypeConstructorInvocation::noarg_nocap(
             stringify!($ty).into(),
         )).into()
+    }};
+    // TODO can we collapse these next two rules? not sure how to alternate Some/None with optional cap constraints
+    ((ty $ty:ident [$($ty_parms:tt)*] [])) => {{
+        use crate::ast;
+        ast::TyKind::TyConstInv(ast::TypeConstructorInvocation {
+            constructor: stringify!($ty).into(),
+            actual_type_parameters: vec![$(ast!($ty_parms)),*],
+            capabilities: None,
+        }).into()
+    }};
+    ((ty $ty:ident [$($ty_parms:tt)*] [$cap_consts:tt])) => {{
+        use crate::ast;
+        ast::TyKind::TyConstInv(ast::TypeConstructorInvocation {
+            constructor: stringify!($ty).into(),
+            actual_type_parameters: vec![$(ast!($ty_parms)),*],
+            capabilities: Some(ast!($cap_consts)),
+        }).into()
     }};
 
     // Cap

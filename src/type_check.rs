@@ -3,14 +3,14 @@ use std::fmt::{Display, Formatter};
 
 use crate::ast;
 use crate::ast::{
-    AstNode, CompilationUnit, CompilationUnitKind, Expr, ExprKind, FunctionImplementation, Ident,
-    ItemKind, Stmt, StmtKind, R,
+    AstNode, CompilationUnit, CompilationUnitKind, Expr, ExprKind, FunctionImplementation,
+    FunctionSignature, Ident, Item, ItemKind, Stmt, StmtKind, R,
 };
 use crate::capabilities::{CapabilityDeclaration, CapabilityExpr};
 use crate::symbol_table::{Opacity, SymbolTable};
 
-use crate::func_decls::FunctionDeclaration;
-use crate::ty::Ty;
+use crate::func_decls::{FunctionDeclaration};
+use crate::ty::{FromAst, Ty};
 use crate::type_check::AssignabilityJudgment::NotAssignable;
 use crate::type_constructors::TypeConstructor;
 use bumpalo::Bump;
@@ -65,7 +65,7 @@ impl<'tc> TypeContext<'tc> {
         self.interners.tys.intern(ty)
     }
 
-    pub(crate) fn intern_func_ty(
+    pub(crate) fn intern_func_decl(
         &'tc self,
         func_decl: FunctionDeclaration<'tc>,
     ) -> &'tc FunctionDeclaration<'tc> {
@@ -384,7 +384,7 @@ impl<'tc> TypingJudgment<'tc> {
 /// Do something returning Result<&Ty, TypeError>, returning &Ty on success and returning early with
 /// TypingJudgment::TypeError(err, env) on error
 macro_rules! ty_try {
-    ($env:ident, $body:expr) => {{
+    ($env:expr, $body:expr) => {{
         match $body {
             Ok(ty) => ty,
             Err(err) => return TypingJudgment::TypeError(err, $env),
@@ -454,17 +454,28 @@ impl<'tc> TypeChecker<'tc> {
     fn check_compilation_unit(&mut self, unit: &CompilationUnit) -> TypeCheckerResult<'tc> {
         match &unit.kind {
             CompilationUnitKind::File(items) => {
+                // go through funcs, structs, etc and extract header info from them, to allow
+                // out-of-order declaration
+
                 let mut item_results: Vec<TypingJudgment<'tc>> = Vec::with_capacity(items.len());
                 for item in items {
-                    match &item.kind {
-                        ItemKind::FuncDecl(_) => {
-                            unimplemented!("TODO add func signature to type context");
-                        }
-                        ItemKind::FuncDeclWithImpl(_, func_impl) => {
-                            // TODO add func signature to type context
-                            let result =
-                                self.check_func_impl(func_impl, Rc::new(Environment::new()));
-                            item_results.push(result);
+                    let result = self.check_header_and_intern(item);
+                    item_results.push(result);
+                }
+
+                // if there's something to check, go through and check them
+                if !item_results.is_empty() && item_results.iter().all(|res| res.is_well_typed()) {
+                    item_results.clear();
+                    for item in items {
+                        match &item.kind {
+                            ItemKind::FuncDecl(_) => {
+                                // nothing to do
+                            }
+                            ItemKind::FuncDeclWithImpl(_, func_impl) => {
+                                let result =
+                                    self.check_func_impl(func_impl, Rc::new(Environment::new()));
+                                item_results.push(result);
+                            }
                         }
                     }
                 }
@@ -481,6 +492,22 @@ impl<'tc> TypeChecker<'tc> {
                 }
             }
         }
+    }
+
+    fn check_header_and_intern(&mut self, item: &Item) -> TypingJudgment<'tc> {
+        match &item.kind {
+            ItemKind::FuncDecl(func_sig) => self.check_func_sig_and_intern(func_sig),
+            ItemKind::FuncDeclWithImpl(func_sig, _) => self.check_func_sig_and_intern(func_sig),
+        }
+    }
+
+    fn check_func_sig_and_intern(&mut self, func_sig: &FunctionSignature) -> TypingJudgment<'tc> {
+        let decl = ty_try!(
+            Rc::new(Environment::new()),
+            FunctionDeclaration::from_ast(func_sig, self.type_context)
+        );
+        let ty = self.type_context.intern_ty(Ty::Func(decl.ty.clone()));
+        TypingJudgment::WellTyped(ty, Rc::new(Environment::new()))
     }
 
     fn check_func_impl(
@@ -562,9 +589,15 @@ impl<'tc> TypeChecker<'tc> {
                         depth: 1,
                     };
                     let existing_ty = last_env.lookup(&var_from_actual).unwrap();
-                    let new_ty_s =
-                        existing_ty.apply_constraint(&cap_const.constraint, self.type_context);
-                    let new_type = self.type_context.intern_ty(new_ty_s);
+                    let new_type =
+                        cap_const
+                            .constraints
+                            .iter()
+                            .fold(existing_ty, |_acc, constraint| {
+                                self.type_context.intern_ty(
+                                    existing_ty.apply_constraint(constraint, self.type_context),
+                                )
+                            });
                     refinements.insert(var_from_actual, new_type);
                 } else {
                     // no binding for us to modify, so just skip
@@ -777,21 +810,23 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::ast;
-    use crate::func_decls::{ArgCapConstraint, CapConstraint, FunctionFormalArg, FunctionType};
-    use crate::ty;
+    
+    
     use crate::type_check::*;
-    use crate::type_constructors::{TypeConstructor, TypeConstructorInvocation};
+    use crate::type_constructors::{TypeConstructor};
     use itertools::Itertools;
 
     #[test]
     fn test_invoke_adds_cap() {
         let comp_unit: ast::R<ast::CompilationUnit> = ast! {
             (file
-                // TODO read func decls and intern their types
+                // TODO struct definitions
+                // struct Foo;
+                // (defstruct Foo [] [])
                 // fn foo(a: Foo) -> Foo => a[+Blah];
-                // (defn foo [(arg a (ty Foo))] [(ty Foo)] [(arg_cap_const a (cap_add (cap Blah)))])
+                (defn foo [(arg a (ty Foo))] [(ty Foo)] [(arg_cap_const a (cap_add (cap Blah)))])
                 // fn bar(a: Foo[Blah]) -> Foo
-                // (defn bar [(arg a (ty Foo (cap Blah))] [(ty Foo)] [])
+                (defn bar [(arg a (ty Foo [] [(cap Blah)]))] [(ty Foo)] [])
                 // fn main() -> Foo { let a: Foo = b; foo(a) }
                 (defn main [] [(ty Foo)] []
                     // let a: Foo = ...;
@@ -812,56 +847,11 @@ mod tests {
         // set up environment: there's a type named `Foo` with no type vars, and `b` is whatever type we need it to be (ie, bottom).
         let areans = Arenas::default();
         let tc = TypeContext::new(&areans);
-        let blah_cap_expr = tc.intern_cap_expr(CapabilityExpr::Cap(
-            tc.intern_cap_decl(CapabilityDeclaration::new("Blah")),
-        ));
-        let foo_tc = tc.intern_type_constructor(TypeConstructor {
+
+        // TODO add struct definitions so we don't need to seed this anymore
+        tc.intern_type_constructor(TypeConstructor {
             name: "Foo",
             type_parameters: vec![],
-        });
-        let foo_tci = tc.intern_ty(ty::Ty::TyConInv(TypeConstructorInvocation {
-            constructor: foo_tc,
-            type_parameter_bindings: vec![],
-            capabilities: None,
-        }));
-        let foo_blah_tci = tc.intern_ty(ty::Ty::TyConInv(TypeConstructorInvocation {
-            constructor: foo_tc,
-            type_parameter_bindings: vec![],
-            capabilities: Some(blah_cap_expr),
-        }));
-
-        fn get_func_type<'tc>(ty: &'tc Ty<'tc>) -> &'tc FunctionType {
-            match ty {
-                Ty::Func(ft) => ft,
-                _ => panic!(),
-            }
-        }
-
-        let _foo_func = tc.intern_func_ty(FunctionDeclaration {
-            name: "foo",
-            ty: get_func_type(tc.intern_ty(Ty::Func(FunctionType {
-                formal_args: vec![FunctionFormalArg {
-                    name: "a",
-                    ty: foo_tci,
-                }],
-                return_type: foo_tci,
-                output_capability_constraints: vec![ArgCapConstraint {
-                    name: "a",
-                    constraint: CapConstraint::Add(blah_cap_expr),
-                }],
-            }))),
-        });
-
-        let _bar_func = tc.intern_func_ty(FunctionDeclaration {
-            name: "bar",
-            ty: get_func_type(tc.intern_ty(Ty::Func(FunctionType {
-                formal_args: vec![FunctionFormalArg {
-                    name: "a",
-                    ty: foo_blah_tci,
-                }],
-                return_type: foo_tci,
-                output_capability_constraints: vec![],
-            }))),
         });
 
         // type check the file with the given env

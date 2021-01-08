@@ -6,9 +6,11 @@ use crate::type_check::{AssignabilityJudgment, Assignable, Name, TypeContext, Ty
 use crate::type_constructors::TypeConstructorInvocation;
 use core::fmt;
 use core::fmt::{Display, Formatter};
-use core::option::Option::None;
+
 use core::result::Result;
 use core::result::Result::Ok;
+use std::borrow::Borrow;
+use std::ops::Deref;
 
 /// The type checker's view of a type. Interned in TypeContext.
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
@@ -20,27 +22,11 @@ pub enum Ty<'tc> {
 }
 
 impl<'tc> Ty<'tc> {
-    pub fn from_ast(
-        expr: &ast::Ty,
+    pub fn from_func_sig(
+        sig: &ast::FunctionSignature,
         type_context: &'tc TypeContext<'tc>,
     ) -> Result<&'tc Ty<'tc>, TypeError> {
-        match &expr.kind() {
-            ast::TyKind::TyVar(v) => Ok(type_context.intern_ty(Ty::Variable(v.name))),
-            ast::TyKind::TyConstInv(tci) => {
-                let constructor = type_context
-                    .lookup_type_constructor(tci.constructor.name)
-                    .ok_or_else(|| format!("No type constructor named {}", tci.constructor.name))?;
-                // TODO do type parameters and capabilities
-                let type_parameter_bindings = Vec::new();
-                let capabilities = None;
-                let new_tci = TypeConstructorInvocation {
-                    constructor,
-                    type_parameter_bindings,
-                    capabilities,
-                };
-                Ok(type_context.intern_ty(Ty::TyConInv(new_tci)))
-            }
-        }
+        Ok(type_context.intern_ty(Ty::Func(FunctionType::from_ast(sig, type_context)?)))
     }
 
     pub fn apply_constraint(
@@ -74,6 +60,37 @@ impl<'tc> Ty<'tc> {
     }
 }
 
+impl<'tc> FromAst<'tc, ast::Ty> for Ty<'tc> {
+    type Output = &'tc Ty<'tc>;
+
+    fn from_ast(
+        ast_ty: &ast::Ty,
+        type_context: &'tc TypeContext<'tc>,
+    ) -> Result<Self::Output, TypeError> {
+        match &ast_ty.kind() {
+            ast::TyKind::TyVar(v) => Ok(type_context.intern_ty(Ty::Variable(v.name))),
+            ast::TyKind::TyConstInv(tci) => {
+                let constructor = type_context
+                    .lookup_type_constructor(tci.constructor.name)
+                    .ok_or_else(|| format!("No type constructor named {}", tci.constructor.name))?;
+                let type_parameter_bindings = Vec::new();
+                let capabilities: Option<&'tc CapabilityExpr<'tc>> = tci
+                    .capabilities
+                    .borrow()
+                    .as_ref()
+                    .map(|ast_cap| CapabilityExpr::from_ast(ast_cap.deref(), type_context))
+                    .transpose()?;
+                let new_tci = TypeConstructorInvocation {
+                    constructor,
+                    type_parameter_bindings,
+                    capabilities,
+                };
+                Ok(type_context.intern_ty(Ty::TyConInv(new_tci)))
+            }
+        }
+    }
+}
+
 impl Assignable for Ty<'_> {
     fn assignable(from: &Self, to: &Self) -> AssignabilityJudgment {
         match (from, to) {
@@ -101,4 +118,10 @@ impl<'tc> Display for Ty<'tc> {
         }
         Ok(())
     }
+}
+
+pub trait FromAst<'tc, Ast> {
+    type Output;
+
+    fn from_ast(ast: &Ast, type_context: &'tc TypeContext<'tc>) -> Result<Self::Output, TypeError>;
 }
