@@ -1,5 +1,7 @@
 use crate::ast;
 use crate::ast::AstNode;
+use crate::capabilities::CapabilityExpr;
+use crate::func_decls::{CapConstraint, FunctionType};
 use crate::type_check::{AssignabilityJudgment, Assignable, Name, TypeContext, TypeError};
 use crate::type_constructors::TypeConstructorInvocation;
 use core::fmt;
@@ -13,6 +15,8 @@ use core::result::Result::Ok;
 pub enum Ty<'tc> {
     Variable(Name),
     TyConInv(TypeConstructorInvocation<'tc>),
+    Func(FunctionType<'tc>),
+    Bottom,
 }
 
 impl<'tc> Ty<'tc> {
@@ -38,15 +42,47 @@ impl<'tc> Ty<'tc> {
             }
         }
     }
+
+    pub fn apply_constraint(
+        &'tc self,
+        constraint: &'tc CapConstraint<'tc>,
+        tc: &'tc TypeContext<'tc>,
+    ) -> Ty<'tc> {
+        match self {
+            Ty::TyConInv(tci) => {
+                match constraint {
+                    CapConstraint::Add(added_caps) => {
+                        let new_caps = if let Some(existing_caps) = tci.capabilities {
+                            tc.intern_cap_expr(CapabilityExpr::And(existing_caps, added_caps))
+                        } else {
+                            added_caps
+                        };
+                        // TODO simplify constraints. eg, this could result in A & (A & B).
+                        Ty::TyConInv(TypeConstructorInvocation {
+                            capabilities: Some(new_caps),
+                            ..tci.clone()
+                        })
+                    }
+                    CapConstraint::Sub(_) => {
+                        unimplemented!("subtracting capability constraints")
+                    }
+                }
+            }
+            Ty::Bottom => Ty::Bottom,
+            _ => self.clone(),
+        }
+    }
 }
 
 impl Assignable for Ty<'_> {
     fn assignable(from: &Self, to: &Self) -> AssignabilityJudgment {
         match (from, to) {
+            (Ty::Bottom, _) => AssignabilityJudgment::Assignable,
             (Ty::Variable(_from_name), Ty::Variable(_to_name)) => {
                 unimplemented!("type variable assignability");
             }
             (Ty::TyConInv(from_tci), Ty::TyConInv(to_tci)) => from_tci.assignable_to(to_tci),
+            // TODO assignability of function types
             _ => {
                 AssignabilityJudgment::not_assignable(format!("{} not assignable to {}", from, to))
             }
@@ -54,12 +90,14 @@ impl Assignable for Ty<'_> {
     }
 }
 
-impl Display for Ty<'_> {
+impl<'tc> Display for Ty<'tc> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         use Ty::*;
         match self {
             Variable(name) => write!(f, "{}", name)?,
             TyConInv(tci) => write!(f, "{}", tci)?,
+            Func(func_type) => write!(f, "{}", func_type)?,
+            Bottom => write!(f, "<bottom>")?,
         }
         Ok(())
     }

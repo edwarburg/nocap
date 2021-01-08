@@ -120,25 +120,25 @@ pub trait AstNode: Debug + Sized {
 ////////////////////////////////////////////////
 
 /// A compilation unit, eg, a file.
-pub struct Unit {
-    header: AstHeader,
-    kind: UnitKind,
+pub struct CompilationUnit {
+    pub header: AstHeader,
+    pub kind: CompilationUnitKind,
 }
 
 #[derive(Debug)]
-pub enum UnitKind {
+pub enum CompilationUnitKind {
     File(Vec<R<Item>>),
 }
 
-node_impls!(Unit, UnitKind);
+node_impls!(CompilationUnit, CompilationUnitKind);
 
 ////////////////////////////////////////////////
 //                  Items                     //
 ////////////////////////////////////////////////
 
 pub struct Item {
-    header: AstHeader,
-    kind: ItemKind,
+    pub header: AstHeader,
+    pub kind: ItemKind,
 }
 
 #[derive(Debug)]
@@ -149,7 +149,23 @@ pub enum ItemKind {
 
 #[derive(Debug)]
 pub struct FunctionSignature {
-    // TODO function signature
+    pub name: Ident,
+    // TODO type parameter declarations
+    pub args: Vec<FunctionFormalArg>,
+    pub return_ty: R<Ty>,
+    pub output_cap_constraints: Vec<ArgCapConstraint>,
+}
+
+#[derive(Debug)]
+pub struct FunctionFormalArg {
+    pub name: Ident,
+    pub ty: R<Ty>,
+}
+
+#[derive(Debug)]
+pub struct ArgCapConstraint {
+    pub for_arg: Ident,
+    pub constraints: Vec<CapConstraint>,
 }
 
 node_impls!(Item, ItemKind);
@@ -160,8 +176,8 @@ pub struct FunctionImplementation {
 }
 
 pub struct Stmt {
-    header: AstHeader,
-    kind: StmtKind,
+    pub header: AstHeader,
+    pub kind: StmtKind,
 }
 
 #[derive(Debug)]
@@ -200,8 +216,6 @@ node_impls!(Expr, ExprKind);
 
 #[derive(Debug)]
 pub enum ExprKind {
-    /// Identifiers. `Foo`, `bar`, etc
-    Ident(Ident),
     /// Variable reference. `foo`, `bar`, etc
     VarRef(Ident),
     /// Blocks of statements, followed by a resulting expression
@@ -243,8 +257,8 @@ pub enum LVal {
 
 /// The AST's view of a type. Can't perform type analysis using it, but can be converted to type_constructors::Ty with a TypeContext
 pub struct Ty {
-    header: AstHeader,
-    kind: TyKind,
+    pub header: AstHeader,
+    pub kind: TyKind,
 }
 
 #[derive(Debug)]
@@ -263,7 +277,7 @@ pub struct TypeConstructorInvocation {
 }
 
 impl TypeConstructorInvocation {
-    fn noarg_nocap(constructor: Ident) -> Self {
+    pub fn noarg_nocap(constructor: Ident) -> Self {
         TypeConstructorInvocation {
             constructor,
             actual_type_parameters: Vec::new(),
@@ -278,8 +292,8 @@ impl TypeConstructorInvocation {
 
 /// The ast's view of capability expressions
 pub struct Cap {
-    header: AstHeader,
-    kind: CapKind,
+    pub header: AstHeader,
+    pub kind: CapKind,
 }
 
 #[derive(Debug)]
@@ -291,6 +305,12 @@ pub enum CapKind {
 
 node_impls!(Cap, CapKind);
 
+#[derive(Debug)]
+pub enum CapConstraint {
+    Add(R<Cap>),
+    Sub(R<Cap>),
+}
+
 #[macro_use]
 #[cfg(test)]
 pub(crate) mod test_utils {
@@ -300,12 +320,64 @@ pub(crate) mod test_utils {
     ///
     /// Why? https://en.wikipedia.org/wiki/Greenspun%27s_tenth_rule, and also because it makes it easy
     /// to write tests for phases of the compiler after parsing without invoking the parser itself.
+    #[macro_export]
     macro_rules! ast {
+
+    // Unit
+    ((file $($items:tt)*)) => {{
+        use crate::ast;
+        ast::CompilationUnitKind::File(vec![$(ast!($items)),*]).into()
+    }};
+
+    // Item
+    ((defn $name:ident [$($args:tt)*] [$ty:tt] [$($var_cap_consts:tt)*])) => {{
+        use crate::ast;
+        ast::ItemKind::FuncDecl(ast::FunctionSignature {
+            name: stringify!($name).into(),
+            args: vec![$(ast!($args)),*],
+            return_ty: ast!($ty),
+            output_cap_constraints: vec![$(ast!($var_cap_consts)),*]
+        }).into()
+    }};
+    ((defn $name:ident [$($args:tt)*] [$ty:tt] [$($var_cap_consts:tt)*] $body:tt)) => {{
+        use crate::ast;
+        ast::ItemKind::FuncDeclWithImpl(
+            ast::FunctionSignature {
+                name: stringify!($name).into(),
+                args: vec![$(ast!($args)),*],
+                return_ty: ast!($ty),
+                output_cap_constraints: vec![$(ast!($var_cap_consts)),*]
+            },
+            ast::FunctionImplementation { body: ast!($body) }
+        ).into()
+    }};
+    ((arg $name:ident $ty:tt)) => {{
+        use crate::ast;
+        ast::FunctionFormalArg {
+            name: stringify!($name).into(),
+            ty: ast!($ty)
+        }
+    }};
+    ((arg_cap_const $name:ident $($const:tt)*)) => {{
+        use crate::ast;
+        ast::ArgCapConstraint {
+            for_arg: stringify!($name).into(),
+            constraints: vec![$(ast!($const)),*]
+        }
+    }};
+
+    // Stmt
+    ((stmt $expr:tt)) => {{
+        use crate::ast;
+        ast::StmtKind::Expr(ast!($expr)).into()
+    }};
+
+    // Expr
     ((let $lhs:ident [$ty:tt] $rhs:tt)) => {{
         use crate::ast;
         ast::StmtKind::VarDecl(
             stringify!($lhs).into(),
-            ast!([$ty]),
+            ast!($ty),
             ast!($rhs),
         ).into()
     }};
@@ -317,18 +389,42 @@ pub(crate) mod test_utils {
         use crate::ast;
         ast::ExprKind::Block(vec![$(ast!($body)),*], ast!($expr)).into()
     }};
-    ([$ty:ident]) => {{
-        use crate::ast;
-        // TODO more complex type expressions, distinguish constructors vs variables
-        ast::TyKind::TyConstInv(ast::TypeConstructorInvocation::noarg_nocap(
-            stringify!($ty).into(),
-        )).into()
-    }};
     ((invoke $fun:ident $($args:tt)*)) => {{
         use crate::ast;
         ast::ExprKind::Invoke(stringify!($fun).into(), vec![$(ast!($args)),*], vec![]).into()
     }};
-}
+
+    // Ty
+    // TODO type parameters, capabilities
+    ((ty $ty:ident)) => {{
+        use crate::ast;
+        ast::TyKind::TyConstInv(ast::TypeConstructorInvocation::noarg_nocap(
+            stringify!($ty).into(),
+        )).into()
+    }};
+
+    // Cap
+    ((cap_add $cap:tt)) => {{
+        use crate::ast;
+        ast::CapConstraint::Add(ast!($cap))
+    }};
+    ((cap_sub $cap:tt)) => {{
+        use crate::ast;
+        ast::CapConstraint::Sub(ast!($cap))
+    }};
+    ((cap $name:ident)) => {{
+        use crate::ast;
+        ast::CapKind::CapRef(stringify!($name).into()).into()
+    }};
+    ((cap_and [$cap1:tt] [$cap2:tt])) => {{
+        use crate::ast;
+        ast::CapKind::And(ast!($cap1), ast!($cap2)).into()
+    }};
+    ((cap_or [$cap1:tt] [$cap2:tt])) => {{
+        use crate::ast;
+        ast::CapKind::Or(ast!($cap1), ast!($cap2)).into()
+    }};
+    }
 }
 
 #[cfg(test)]
@@ -339,8 +435,8 @@ mod tests {
     fn test_macro() {
         let node: R<Expr> = ast! {
             (block
-                [(let a [Foo] b)
-                 (let c [Bar] d)]
+                [(let a [(ty Foo)] b)
+                 (let c [(ty Bar)] d)]
                 (invoke foo a c))
         };
         println!("{:#?}", node);

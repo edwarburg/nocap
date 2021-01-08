@@ -2,14 +2,19 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 
 use crate::ast;
-use crate::ast::{AstNode, Expr, ExprKind, FunctionImplementation, Ident, Stmt, StmtKind, R};
+use crate::ast::{
+    AstNode, CompilationUnit, CompilationUnitKind, Expr, ExprKind, FunctionImplementation, Ident,
+    ItemKind, Stmt, StmtKind, R,
+};
 use crate::capabilities::{CapabilityDeclaration, CapabilityExpr};
 use crate::symbol_table::{Opacity, SymbolTable};
 
+use crate::func_decls::FunctionDeclaration;
 use crate::ty::Ty;
 use crate::type_check::AssignabilityJudgment::NotAssignable;
 use crate::type_constructors::TypeConstructor;
 use bumpalo::Bump;
+use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::rc::Rc;
@@ -19,7 +24,7 @@ use std::sync::Mutex;
 pub type Name = &'static str;
 
 pub struct TypeContext<'tc> {
-    arenas: &'tc Arenas,
+    pub arenas: &'tc Arenas,
     interners: Interners<'tc>,
 }
 
@@ -36,6 +41,10 @@ impl<'tc> TypeContext<'tc> {
         type_constructor: TypeConstructor,
     ) -> &'tc TypeConstructor {
         self.interners.type_constructors.intern(type_constructor)
+    }
+
+    pub(crate) fn lookup_type_constructor(&self, name: Name) -> Option<&TypeConstructor> {
+        self.interners.type_constructors.lookup(name)
     }
 
     pub(crate) fn intern_cap_decl(
@@ -56,8 +65,15 @@ impl<'tc> TypeContext<'tc> {
         self.interners.tys.intern(ty)
     }
 
-    pub(crate) fn lookup_type_constructor(&self, _name: Name) -> Option<&TypeConstructor> {
-        unimplemented!("type constructor lookup in type context")
+    pub(crate) fn intern_func_ty(
+        &'tc self,
+        func_decl: FunctionDeclaration<'tc>,
+    ) -> &'tc FunctionDeclaration<'tc> {
+        self.interners.func_decls.intern(func_decl)
+    }
+
+    pub(crate) fn lookup_func_decl(&'tc self, name: Name) -> Option<&'tc FunctionDeclaration<'tc>> {
+        self.interners.func_decls.lookup(name)
     }
 }
 
@@ -67,6 +83,7 @@ pub struct Arenas {
     capability_declarations: Bump,
     capability_expressions: Bump,
     tys: Bump,
+    func_decls: Bump,
 }
 
 struct Interners<'tc> {
@@ -74,6 +91,7 @@ struct Interners<'tc> {
     capability_declarations: InternedById<'tc, Name, CapabilityDeclaration>,
     capability_expressions: InternedBySet<'tc, CapabilityExpr<'tc>>,
     tys: InternedBySet<'tc, Ty<'tc>>,
+    func_decls: InternedById<'tc, Name, FunctionDeclaration<'tc>>,
 }
 
 impl<'tc> Interners<'tc> {
@@ -83,6 +101,7 @@ impl<'tc> Interners<'tc> {
             capability_declarations: InternedById::new(&arenas.capability_declarations),
             capability_expressions: InternedBySet::new(&arenas.capability_expressions),
             tys: InternedBySet::new(&arenas.tys),
+            func_decls: InternedById::new(&arenas.func_decls),
         }
     }
 }
@@ -113,6 +132,11 @@ impl<'a, Id: Eq + PartialEq + Ord + PartialOrd + Hash, T: Identifiable<Id>>
         let mut map = self.map.lock().unwrap();
         map.insert(id, it);
         it
+    }
+
+    fn lookup(&self, id: Id) -> Option<&T> {
+        let map = self.map.lock().unwrap();
+        map.get(&id).map(|t| *t)
     }
 }
 
@@ -284,6 +308,7 @@ pub type TypeError = String;
 /// and a new environment reflecting the refined type of `foo`.
 pub enum TypingJudgment<'tc> {
     WellTyped(&'tc Ty<'tc>, Env<'tc>),
+    // TODO ty to use for error recovery?
     TypeError(TypeError, Env<'tc>),
 }
 
@@ -293,6 +318,19 @@ impl<'tc> Into<Result<&'tc Ty<'tc>, TypeError>> for TypingJudgment<'tc> {
         match self {
             TypingJudgment::WellTyped(ty, _env) => Ok(ty),
             TypingJudgment::TypeError(reason, _env) => Err(reason),
+        }
+    }
+}
+
+impl<'tc> Display for TypingJudgment<'tc> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypingJudgment::WellTyped(ty, _) => {
+                write!(f, "WellTyped({})", ty)
+            }
+            TypingJudgment::TypeError(err, _) => {
+                write!(f, "TypeErr({})", err)
+            }
         }
     }
 }
@@ -307,6 +345,38 @@ impl<'tc> TypingJudgment<'tc> {
         match self {
             TypingJudgment::WellTyped(ty, env) => action(ty, env),
             TypingJudgment::TypeError(_, _) => self,
+        }
+    }
+
+    fn is_well_typed(&self) -> bool {
+        match self {
+            TypingJudgment::WellTyped(_, _) => true,
+            _ => false,
+        }
+    }
+
+    fn is_type_error(&self) -> bool {
+        match self {
+            TypingJudgment::TypeError(_, _) => true,
+            _ => false,
+        }
+    }
+
+    fn env(&self) -> Env<'tc> {
+        match self {
+            TypingJudgment::WellTyped(_, env) => env.clone(),
+            TypingJudgment::TypeError(_, env) => env.clone(),
+        }
+    }
+
+    fn replacing_env(self, new_env: Env<'tc>) -> TypingJudgment<'tc> {
+        match self {
+            TypingJudgment::WellTyped(ty, _old_env) => {
+                TypingJudgment::WellTyped(ty, new_env.clone())
+            }
+            TypingJudgment::TypeError(err, _old_env) => {
+                TypingJudgment::TypeError(err.clone(), new_env.clone())
+            }
         }
     }
 }
@@ -338,7 +408,81 @@ struct TypeChecker<'tc> {
 
 type Env<'tc> = Rc<Environment<'tc>>;
 
+pub enum TypeCheckerResult<'tc> {
+    Ok {
+        final_env: Env<'tc>,
+    },
+    Err {
+        final_env: Env<'tc>,
+        item_results: Vec<TypingJudgment<'tc>>,
+    },
+}
+
+impl<'tc> TypeCheckerResult<'tc> {
+    fn is_ok(&self) -> bool {
+        match self {
+            TypeCheckerResult::Ok { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn is_err(&self) -> bool {
+        match self {
+            TypeCheckerResult::Err { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn final_env(&'tc self) -> Env<'tc> {
+        match self {
+            TypeCheckerResult::Ok { final_env, .. } => final_env.clone(),
+            TypeCheckerResult::Err { final_env, .. } => final_env.clone(),
+        }
+    }
+}
+
+impl<'tc> Into<Result<(), Vec<TypingJudgment<'tc>>>> for TypeCheckerResult<'tc> {
+    fn into(self) -> Result<(), Vec<TypingJudgment<'tc>>> {
+        match self {
+            TypeCheckerResult::Ok { .. } => Result::Ok(()),
+            TypeCheckerResult::Err { item_results, .. } => Result::Err(item_results),
+        }
+    }
+}
+
 impl<'tc> TypeChecker<'tc> {
+    fn check_compilation_unit(&mut self, unit: &CompilationUnit) -> TypeCheckerResult<'tc> {
+        match &unit.kind {
+            CompilationUnitKind::File(items) => {
+                let mut item_results: Vec<TypingJudgment<'tc>> = Vec::with_capacity(items.len());
+                for item in items {
+                    match &item.kind {
+                        ItemKind::FuncDecl(_) => {
+                            unimplemented!("TODO add func signature to type context");
+                        }
+                        ItemKind::FuncDeclWithImpl(_, func_impl) => {
+                            // TODO add func signature to type context
+                            let result =
+                                self.check_func_impl(func_impl, Rc::new(Environment::new()));
+                            item_results.push(result);
+                        }
+                    }
+                }
+
+                let final_env = item_results.iter().last().unwrap().env().clone();
+
+                if item_results.iter().all(|result| result.is_well_typed()) {
+                    TypeCheckerResult::Ok { final_env }
+                } else {
+                    TypeCheckerResult::Err {
+                        item_results,
+                        final_env,
+                    }
+                }
+            }
+        }
+    }
+
     fn check_func_impl(
         &mut self,
         func_impl: &FunctionImplementation,
@@ -350,6 +494,7 @@ impl<'tc> TypeChecker<'tc> {
     fn check_stmt(&mut self, stmt: &Stmt, env: Env<'tc>) -> TypingJudgment<'tc> {
         match &stmt.kind() {
             StmtKind::VarDecl(lhs, ty, rhs) => self.check_var_decl(lhs, ty, rhs, env),
+            StmtKind::Expr(expr) => self.check_expr(expr, env),
             _ => unimplemented!("haven't implemented type checking for {:#?}", stmt),
         }
     }
@@ -358,7 +503,85 @@ impl<'tc> TypeChecker<'tc> {
         match &expr.kind {
             ExprKind::VarRef(ident) => self.check_var_ref(ident, env),
             ExprKind::Block(stmts, expr) => self.check_block(stmts, expr, env),
-            _ => unimplemented!("haven't implemented type checking for {:#?}", expr),
+            ExprKind::Invoke(func_ident, actual_args, type_args) => {
+                self.check_invoke(func_ident, actual_args, type_args, env)
+            }
+        }
+    }
+
+    fn check_invoke(
+        &mut self,
+        func_ident: &Ident,
+        actual_args: &Vec<R<Expr>>,
+        _type_args: &Vec<R<ast::Ty>>,
+        env: Env<'tc>,
+    ) -> TypingJudgment<'tc> {
+        // TODO handle type args
+        if let Some(func_decl) = self.type_context.lookup_func_decl(func_ident.name) {
+            let expected_num_args = func_decl.ty.formal_args.len();
+            let actual_num_args = actual_args.len();
+            if actual_num_args != expected_num_args {
+                return TypingJudgment::TypeError(format!("Wrong number of args for invocation of function {}: expected {}, actual {}", func_ident.name, expected_num_args, actual_num_args), env.clone());
+            }
+            let mut last_tj = TypingJudgment::WellTyped(&Ty::Bottom, env.clone());
+            for (formal, actual) in func_decl.ty.formal_args.iter().zip(actual_args.iter()) {
+                let env = last_tj.env();
+                let tj = self.check_expr(actual, env);
+                if let TypingJudgment::WellTyped(actual_ty, new_env) = &tj {
+                    if !actual_ty.assignable_to(formal.ty).is_assignable() {
+                        last_tj = TypingJudgment::TypeError(
+                            format!(
+                                "wrong type for parameter. expected {}, actual {}",
+                                formal.ty, actual_ty
+                            ),
+                            new_env.clone(),
+                        );
+                    } else {
+                        last_tj = tj;
+                    }
+                } else {
+                    last_tj = tj;
+                }
+            }
+
+            let last_env = last_tj.env();
+            let mut refinements =
+                Refinements::with_capacity(func_decl.ty.output_capability_constraints.len());
+            for cap_const in func_decl.ty.output_capability_constraints.iter() {
+                let (idx, _arg) = func_decl
+                    .ty
+                    .formal_args
+                    .iter()
+                    .find_position(|arg| arg.name == cap_const.name)
+                    .unwrap();
+                let expr = &actual_args[idx];
+                if let ast::ExprKind::VarRef(_name) = &expr.kind {
+                    // TODO var_ref needs to tell us the depth here somehow...
+                    let var_from_actual = ScopedVar {
+                        name: cap_const.name,
+                        depth: 1,
+                    };
+                    let existing_ty = last_env.lookup(&var_from_actual).unwrap();
+                    let new_ty_s =
+                        existing_ty.apply_constraint(&cap_const.constraint, self.type_context);
+                    let new_type = self.type_context.intern_ty(new_ty_s);
+                    refinements.insert(var_from_actual, new_type);
+                } else {
+                    // no binding for us to modify, so just skip
+                    continue;
+                }
+            }
+
+            if refinements.is_empty() {
+                last_tj
+            } else {
+                last_tj.replacing_env(last_env.refine_map(refinements))
+            }
+        } else {
+            TypingJudgment::TypeError(
+                format!("no such function: {}", func_ident.name),
+                env.clone(),
+            )
         }
     }
 
@@ -369,10 +592,12 @@ impl<'tc> TypeChecker<'tc> {
             .and_then(|var| env.lookup(var))
             .map_or_else(
                 || {
-                    TypingJudgment::TypeError(
-                        format!("variable not in scope: {}", ident.name),
-                        env.clone(),
-                    )
+                    // TODO just for tests, return bottom type for unknown variable references
+                    TypingJudgment::WellTyped(&Ty::Bottom, env.clone())
+                    // TypingJudgment::TypeError(
+                    //     format!("variable not in scope: {}", ident.name),
+                    //     env.clone(),
+                    // )
                 },
                 |ty| TypingJudgment::WellTyped(ty, env.clone()),
             )
@@ -551,6 +776,122 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    use crate::ast;
+    use crate::func_decls::{ArgCapConstraint, CapConstraint, FunctionFormalArg, FunctionType};
+    use crate::ty;
+    use crate::type_check::*;
+    use crate::type_constructors::{TypeConstructor, TypeConstructorInvocation};
+    use itertools::Itertools;
+
     #[test]
-    fn test_invoke_adds_cap() {}
+    fn test_invoke_adds_cap() {
+        let comp_unit: ast::R<ast::CompilationUnit> = ast! {
+            (file
+                // TODO read func decls and intern their types
+                // fn foo(a: Foo) -> Foo => a[+Blah];
+                // (defn foo [(arg a (ty Foo))] [(ty Foo)] [(arg_cap_const a (cap_add (cap Blah)))])
+                // fn bar(a: Foo[Blah]) -> Foo
+                // (defn bar [(arg a (ty Foo (cap Blah))] [(ty Foo)] [])
+                // fn main() -> Foo { let a: Foo = b; foo(a) }
+                (defn main [] [(ty Foo)] []
+                    // let a: Foo = ...;
+                    // let b: Foo = ...;
+                    // foo(a);
+                    // bar(a);
+                    // bar(b) // in my bar(b) world
+                    (block
+                        [(let a [(ty Foo)] _a)
+                         (let b [(ty Foo)] _b)
+                         (stmt (invoke foo a))
+                         // should succeed since `a` gained `Blah` after invoking `foo`
+                         (stmt (invoke bar a))]
+                         // should fail because `b` is just `Foo` not `Foo[Blah]`
+                        (invoke bar b))))
+        };
+
+        // set up environment: there's a type named `Foo` with no type vars, and `b` is whatever type we need it to be (ie, bottom).
+        let areans = Arenas::default();
+        let tc = TypeContext::new(&areans);
+        let blah_cap_expr = tc.intern_cap_expr(CapabilityExpr::Cap(
+            tc.intern_cap_decl(CapabilityDeclaration::new("Blah")),
+        ));
+        let foo_tc = tc.intern_type_constructor(TypeConstructor {
+            name: "Foo",
+            type_parameters: vec![],
+        });
+        let foo_tci = tc.intern_ty(ty::Ty::TyConInv(TypeConstructorInvocation {
+            constructor: foo_tc,
+            type_parameter_bindings: vec![],
+            capabilities: None,
+        }));
+        let foo_blah_tci = tc.intern_ty(ty::Ty::TyConInv(TypeConstructorInvocation {
+            constructor: foo_tc,
+            type_parameter_bindings: vec![],
+            capabilities: Some(blah_cap_expr),
+        }));
+
+        fn get_func_type<'tc>(ty: &'tc Ty<'tc>) -> &'tc FunctionType {
+            match ty {
+                Ty::Func(ft) => ft,
+                _ => panic!(),
+            }
+        }
+
+        let _foo_func = tc.intern_func_ty(FunctionDeclaration {
+            name: "foo",
+            ty: get_func_type(tc.intern_ty(Ty::Func(FunctionType {
+                formal_args: vec![FunctionFormalArg {
+                    name: "a",
+                    ty: foo_tci,
+                }],
+                return_type: foo_tci,
+                output_capability_constraints: vec![ArgCapConstraint {
+                    name: "a",
+                    constraint: CapConstraint::Add(blah_cap_expr),
+                }],
+            }))),
+        });
+
+        let _bar_func = tc.intern_func_ty(FunctionDeclaration {
+            name: "bar",
+            ty: get_func_type(tc.intern_ty(Ty::Func(FunctionType {
+                formal_args: vec![FunctionFormalArg {
+                    name: "a",
+                    ty: foo_blah_tci,
+                }],
+                return_type: foo_tci,
+                output_capability_constraints: vec![],
+            }))),
+        });
+
+        // type check the file with the given env
+        let local_context = LocalContext::default();
+        let mut checker = TypeChecker {
+            type_context: &tc,
+            local_context,
+        };
+
+        // println!("{:#?}", comp_unit);
+        let result = checker.check_compilation_unit(&*comp_unit);
+        match result {
+            TypeCheckerResult::Ok { .. } => {
+                assert!(
+                    false,
+                    format!("expected type checker to fail, but it succeeded")
+                );
+            }
+            TypeCheckerResult::Err { item_results, .. } => {
+                let err = item_results.iter().find(|tj| {
+                    if let TypingJudgment::TypeError(err, _) = tj {
+                        err.contains("wrong type for parameter. expected Foo[Blah], actual Foo")
+                    } else {
+                        false
+                    }
+                });
+                if err.is_none() {
+                    assert!(false, "Expected error like 'wrong type for parameter. expected Foo[Blah], actual Foo', but got:\n{}", item_results.iter().join("\n"));
+                }
+            }
+        }
+    }
 }

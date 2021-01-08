@@ -5,6 +5,7 @@ mod ast;
 mod capabilities;
 #[macro_use]
 mod symbol_table;
+mod func_decls;
 mod ty;
 mod type_check;
 mod type_constructors;
