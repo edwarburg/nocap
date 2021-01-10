@@ -19,6 +19,7 @@ pub enum Ty<'tc> {
     TyConInv(TypeConstructorInvocation<'tc>),
     Func(FunctionType<'tc>),
     Bottom,
+    Unit,
 }
 
 impl<'tc> Ty<'tc> {
@@ -94,6 +95,7 @@ impl<'tc> FromAst<'tc, ast::Ty> for Ty<'tc> {
 impl Assignable for Ty<'_> {
     fn assignable(from: &Self, to: &Self) -> AssignabilityJudgment {
         match (from, to) {
+            (Ty::Unit, Ty::Unit) => AssignabilityJudgment::Assignable,
             (Ty::Bottom, _) => AssignabilityJudgment::Assignable,
             (Ty::Variable(_from_name), Ty::Variable(_to_name)) => {
                 unimplemented!("type variable assignability");
@@ -115,6 +117,7 @@ impl<'tc> Display for Ty<'tc> {
             TyConInv(tci) => write!(f, "{}", tci)?,
             Func(func_type) => write!(f, "{}", func_type)?,
             Bottom => write!(f, "<bottom>")?,
+            Unit => write!(f, "()")?,
         }
         Ok(())
     }

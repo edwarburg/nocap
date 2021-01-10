@@ -1,15 +1,12 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::ast;
-use crate::ast::{
-    AstNode, CompilationUnit, CompilationUnitKind, Expr, ExprKind, FunctionImplementation,
-    FunctionSignature, Ident, Item, ItemKind, Stmt, StmtKind, R,
-};
 use crate::capabilities::{CapabilityDeclaration, CapabilityExpr};
 use crate::symbol_table::{Opacity, SymbolTable};
+use crate::{ast, capabilities};
 
-use crate::func_decls::{FunctionDeclaration};
+use crate::ast::R;
+use crate::func_decls::FunctionDeclaration;
 use crate::ty::{FromAst, Ty};
 use crate::type_check::AssignabilityJudgment::NotAssignable;
 use crate::type_constructors::TypeConstructor;
@@ -27,6 +24,8 @@ pub struct TypeContext<'tc> {
     pub arenas: &'tc Arenas,
     interners: Interners<'tc>,
 }
+
+impl<'tc> TypeContext<'tc> {}
 
 impl<'tc> TypeContext<'tc> {
     pub fn new(arenas: &'tc Arenas) -> TypeContext<'tc> {
@@ -52,6 +51,10 @@ impl<'tc> TypeContext<'tc> {
         cap_decl: CapabilityDeclaration,
     ) -> &'tc CapabilityDeclaration {
         self.interners.capability_declarations.intern(cap_decl)
+    }
+
+    pub(crate) fn lookup_cap_decl(&self, name: Name) -> Option<&CapabilityDeclaration> {
+        self.interners.capability_declarations.lookup(name)
     }
 
     pub(crate) fn intern_cap_expr(
@@ -451,7 +454,8 @@ impl<'tc> Into<Result<(), Vec<TypingJudgment<'tc>>>> for TypeCheckerResult<'tc> 
 }
 
 impl<'tc> TypeChecker<'tc> {
-    fn check_compilation_unit(&mut self, unit: &CompilationUnit) -> TypeCheckerResult<'tc> {
+    fn check_compilation_unit(&mut self, unit: &ast::CompilationUnit) -> TypeCheckerResult<'tc> {
+        use crate::ast::*;
         match &unit.kind {
             CompilationUnitKind::File(items) => {
                 // go through funcs, structs, etc and extract header info from them, to allow
@@ -476,6 +480,8 @@ impl<'tc> TypeChecker<'tc> {
                                     self.check_func_impl(func_impl, Rc::new(Environment::new()));
                                 item_results.push(result);
                             }
+                            ItemKind::CapDecl(_cap_decl) => {}
+                            ItemKind::StructDecl(_struct_decl) => {}
                         }
                     }
                 }
@@ -494,31 +500,63 @@ impl<'tc> TypeChecker<'tc> {
         }
     }
 
-    fn check_header_and_intern(&mut self, item: &Item) -> TypingJudgment<'tc> {
+    fn check_header_and_intern(&mut self, item: &ast::Item) -> TypingJudgment<'tc> {
+        use crate::ast::*;
         match &item.kind {
             ItemKind::FuncDecl(func_sig) => self.check_func_sig_and_intern(func_sig),
             ItemKind::FuncDeclWithImpl(func_sig, _) => self.check_func_sig_and_intern(func_sig),
+            ItemKind::CapDecl(cap_decl) => self.check_cap_decl_and_intern(cap_decl),
+            ItemKind::StructDecl(struct_decl) => self.check_struct_decl_and_intern(struct_decl),
         }
     }
 
-    fn check_func_sig_and_intern(&mut self, func_sig: &FunctionSignature) -> TypingJudgment<'tc> {
+    fn check_func_sig_and_intern(
+        &mut self,
+        func_sig: &ast::FunctionSignature,
+    ) -> TypingJudgment<'tc> {
         let decl = ty_try!(
             Rc::new(Environment::new()),
             FunctionDeclaration::from_ast(func_sig, self.type_context)
         );
-        let ty = self.type_context.intern_ty(Ty::Func(decl.ty.clone()));
-        TypingJudgment::WellTyped(ty, Rc::new(Environment::new()))
+        self.type_context.intern_ty(Ty::Func(decl.ty.clone()));
+        TypingJudgment::WellTyped(&Ty::Unit, Rc::new(Environment::new()))
+    }
+
+    fn check_cap_decl_and_intern(
+        &mut self,
+        cap_decl: &ast::CapabilityDeclaration,
+    ) -> TypingJudgment<'tc> {
+        self.type_context
+            .intern_cap_decl(capabilities::CapabilityDeclaration {
+                name: cap_decl.name,
+            });
+
+        TypingJudgment::WellTyped(&Ty::Unit, Rc::new(Environment::new()))
+    }
+
+    fn check_struct_decl_and_intern(
+        &mut self,
+        struct_decl: &ast::StructDeclaration,
+    ) -> TypingJudgment<'tc> {
+        use crate::type_constructors::*;
+        self.type_context.intern_type_constructor(TypeConstructor {
+            name: struct_decl.name,
+            type_parameters: vec![],
+        });
+
+        TypingJudgment::WellTyped(&Ty::Unit, Rc::new(Environment::new()))
     }
 
     fn check_func_impl(
         &mut self,
-        func_impl: &FunctionImplementation,
+        func_impl: &ast::FunctionImplementation,
         env: Env<'tc>,
     ) -> TypingJudgment<'tc> {
         self.check_expr(&func_impl.body, env)
     }
 
-    fn check_stmt(&mut self, stmt: &Stmt, env: Env<'tc>) -> TypingJudgment<'tc> {
+    fn check_stmt(&mut self, stmt: &ast::Stmt, env: Env<'tc>) -> TypingJudgment<'tc> {
+        use crate::ast::*;
         match &stmt.kind() {
             StmtKind::VarDecl(lhs, ty, rhs) => self.check_var_decl(lhs, ty, rhs, env),
             StmtKind::Expr(expr) => self.check_expr(expr, env),
@@ -526,7 +564,8 @@ impl<'tc> TypeChecker<'tc> {
         }
     }
 
-    fn check_expr(&mut self, expr: &Expr, env: Env<'tc>) -> TypingJudgment<'tc> {
+    fn check_expr(&mut self, expr: &ast::Expr, env: Env<'tc>) -> TypingJudgment<'tc> {
+        use crate::ast::*;
         match &expr.kind {
             ExprKind::VarRef(ident) => self.check_var_ref(ident, env),
             ExprKind::Block(stmts, expr) => self.check_block(stmts, expr, env),
@@ -538,8 +577,8 @@ impl<'tc> TypeChecker<'tc> {
 
     fn check_invoke(
         &mut self,
-        func_ident: &Ident,
-        actual_args: &Vec<R<Expr>>,
+        func_ident: &ast::Ident,
+        actual_args: &Vec<R<ast::Expr>>,
         _type_args: &Vec<R<ast::Ty>>,
         env: Env<'tc>,
     ) -> TypingJudgment<'tc> {
@@ -618,7 +657,7 @@ impl<'tc> TypeChecker<'tc> {
         }
     }
 
-    fn check_var_ref(&mut self, ident: &Ident, env: Env<'tc>) -> TypingJudgment<'tc> {
+    fn check_var_ref(&mut self, ident: &ast::Ident, env: Env<'tc>) -> TypingJudgment<'tc> {
         self.local_context
             .symbols
             .lookup(&ident.name)
@@ -638,9 +677,9 @@ impl<'tc> TypeChecker<'tc> {
 
     fn check_var_decl(
         &mut self,
-        lhs: &Ident,
+        lhs: &ast::Ident,
         ty: &ast::Ty,
-        rhs: &Expr,
+        rhs: &ast::Expr,
         env: Env<'tc>,
     ) -> TypingJudgment<'tc> {
         self.check_expr(rhs, env).and_then(|rhs_ty, env| {
@@ -662,8 +701,8 @@ impl<'tc> TypeChecker<'tc> {
 
     fn check_block(
         &mut self,
-        stmts: &Vec<R<Stmt>>,
-        expr: &R<Expr>,
+        stmts: &Vec<R<ast::Stmt>>,
+        expr: &R<ast::Expr>,
         env: Env<'tc>,
     ) -> TypingJudgment<'tc> {
         let outer_env = env.clone();
@@ -810,19 +849,18 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::ast;
-    
-    
+
     use crate::type_check::*;
-    use crate::type_constructors::{TypeConstructor};
     use itertools::Itertools;
 
     #[test]
     fn test_invoke_adds_cap() {
         let comp_unit: ast::R<ast::CompilationUnit> = ast! {
             (file
-                // TODO struct definitions
-                // struct Foo;
-                // (defstruct Foo [] [])
+                // cap Blah;
+                (defcap Blah)
+                // struct Foo<> {};
+                (defstruct Foo [] [])
                 // fn foo(a: Foo) -> Foo => a[+Blah];
                 (defn foo [(arg a (ty Foo))] [(ty Foo)] [(arg_cap_const a (cap_add (cap Blah)))])
                 // fn bar(a: Foo[Blah]) -> Foo
@@ -847,12 +885,6 @@ mod tests {
         // set up environment: there's a type named `Foo` with no type vars, and `b` is whatever type we need it to be (ie, bottom).
         let areans = Arenas::default();
         let tc = TypeContext::new(&areans);
-
-        // TODO add struct definitions so we don't need to seed this anymore
-        tc.intern_type_constructor(TypeConstructor {
-            name: "Foo",
-            type_parameters: vec![],
-        });
 
         // type check the file with the given env
         let local_context = LocalContext::default();

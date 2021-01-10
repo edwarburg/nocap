@@ -145,7 +145,11 @@ pub struct Item {
 pub enum ItemKind {
     FuncDecl(FunctionSignature),
     FuncDeclWithImpl(FunctionSignature, FunctionImplementation),
+    StructDecl(StructDeclaration),
+    CapDecl(CapabilityDeclaration),
 }
+
+node_impls!(Item, ItemKind);
 
 #[derive(Debug)]
 pub struct FunctionSignature {
@@ -168,12 +172,24 @@ pub struct ArgCapConstraint {
     pub constraints: Vec<CapConstraint>,
 }
 
-node_impls!(Item, ItemKind);
-
 #[derive(Debug)]
 pub struct FunctionImplementation {
     pub body: R<Expr>,
 }
+
+#[derive(Debug)]
+pub struct StructDeclaration {
+    pub name: Name,
+}
+
+#[derive(Debug)]
+pub struct CapabilityDeclaration {
+    pub name: Name,
+}
+
+////////////////////////////////////////////////
+//               Statements                   //
+////////////////////////////////////////////////
 
 pub struct Stmt {
     pub header: AstHeader,
@@ -212,8 +228,6 @@ impl Expr {
     }
 }
 
-node_impls!(Expr, ExprKind);
-
 #[derive(Debug)]
 pub enum ExprKind {
     /// Variable reference. `foo`, `bar`, etc
@@ -228,6 +242,8 @@ pub enum ExprKind {
     /// function invocation. `foo()`, `foo<A>(a, b)`, etc
     Invoke(Ident, Vec<R<Expr>>, Vec<R<Ty>>),
 }
+
+node_impls!(Expr, ExprKind);
 
 #[derive(Debug)]
 pub struct Ident {
@@ -364,6 +380,18 @@ pub(crate) mod test_utils {
             for_arg: stringify!($name).into(),
             constraints: vec![$(ast!($const)),*]
         }
+    }};
+    ((defcap $name:ident)) => {{
+        use crate::ast;
+        ast::ItemKind::CapDecl(ast::CapabilityDeclaration {
+            name: stringify!($name).into()
+        }).into()
+    }};
+    ((defstruct $name:ident [] [])) => {{
+        use crate::ast;
+        ast::ItemKind::StructDecl(ast::StructDeclaration {
+            name: stringify!($name).into()
+        }).into()
     }};
 
     // Stmt

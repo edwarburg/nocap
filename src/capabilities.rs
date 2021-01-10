@@ -45,12 +45,11 @@ impl<'tc> FromAst<'tc, ast::Cap> for CapabilityExpr<'tc> {
 
     fn from_ast(ast: &Cap, type_context: &'tc TypeContext<'tc>) -> Result<Self::Output, TypeError> {
         Ok(type_context.intern_cap_expr(match &ast.kind {
-            CapKind::CapRef(cap) => {
-                // TODO or should this be a lookup of an existing cap decl?
-                CapabilityExpr::Cap(
-                    type_context.intern_cap_decl(CapabilityDeclaration { name: cap.name }),
-                )
-            }
+            CapKind::CapRef(cap) => CapabilityExpr::Cap(
+                type_context
+                    .lookup_cap_decl(cap.name)
+                    .ok_or_else(|| format!("unknown capability: {}", cap.name))?,
+            ),
             CapKind::And(lhs, rhs) => {
                 let lhs = CapabilityExpr::from_ast(lhs, type_context)?;
                 let rhs = CapabilityExpr::from_ast(rhs, type_context)?;

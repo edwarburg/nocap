@@ -1,4 +1,4 @@
-use crate::ast::{FunctionSignature};
+use crate::ast::FunctionSignature;
 use crate::capabilities::CapabilityExpr;
 use crate::ty::{FromAst, Ty};
 use crate::type_check::{Identifiable, Name, TypeContext, TypeError};
