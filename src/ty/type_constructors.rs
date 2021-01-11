@@ -4,9 +4,9 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::{Hash, Hasher};
 
-use crate::capabilities::CapabilityExpr;
+use crate::ty::CapabilityExpr;
 use crate::ty::Ty;
-use crate::type_check::{AssignabilityJudgment, Assignable, Identifiable, Name};
+use crate::typecheck::{Identifiable, Name};
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
 pub struct TypeParameterDeclaration {
@@ -102,51 +102,13 @@ impl Display for TypeConstructorInvocation<'_> {
     }
 }
 
-impl Assignable for TypeConstructorInvocation<'_> {
-    fn assignable(from: &Self, to: &Self) -> AssignabilityJudgment {
-        use AssignabilityJudgment::*;
-        if from == to {
-            return Assignable;
-        }
-        match (from, to) {
-            (
-                TypeConstructorInvocation {
-                    constructor: from_const,
-                    ..
-                },
-                TypeConstructorInvocation {
-                    constructor: to_const,
-                    ..
-                },
-            ) => {
-                if from_const == to_const {
-                    match (from.capabilities, to.capabilities) {
-                        (None, None) => Assignable,
-                        (Some(_), None) => Assignable,
-                        (None, Some(to_caps)) => AssignabilityJudgment::not_assignable(format!(
-                            "{} does not have capability {}",
-                            from, to_caps
-                        )),
-                        (Some(from_caps), Some(to_caps)) => from_caps.assignable_to(to_caps),
-                    }
-                } else {
-                    AssignabilityJudgment::not_assignable(format!(
-                        "{} is not assignable to {}",
-                        from_const, to_const
-                    ))
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::capabilities::CapabilityExpr::Or;
-    use crate::capabilities::{CapabilityDeclaration, CapabilityExpr};
-    use crate::type_check::test_utils::{assert_assignable_to, assert_not_assignable_to};
-    use crate::type_check::{Arenas, TypeContext};
-    use crate::type_constructors::{TypeConstructor, TypeConstructorInvocation};
+    use crate::ty::capabilities::CapabilityExpr::Or;
+    use crate::ty::capabilities::{CapabilityDeclaration, CapabilityExpr};
+    use crate::ty::type_constructors::{TypeConstructor, TypeConstructorInvocation};
+    use crate::typecheck::test_utils::{assert_assignable_to, assert_not_assignable_to};
+    use crate::typecheck::{Arenas, TypeContext};
 
     macro_rules! with_fixture {
         ($fix:ident, $body:block) => {

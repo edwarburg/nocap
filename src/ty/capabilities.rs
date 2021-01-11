@@ -1,12 +1,7 @@
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::ast;
-use crate::ast::{Cap, CapKind};
-use crate::ty::FromAst;
-use crate::type_check::{
-    AssignabilityJudgment, Assignable, Identifiable, Name, TypeContext, TypeError,
-};
+use crate::typecheck::{Identifiable, Name};
 
 /// Declaration of a capability
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
@@ -40,30 +35,6 @@ pub enum CapabilityExpr<'tc> {
     Or(&'tc CapabilityExpr<'tc>, &'tc CapabilityExpr<'tc>),
 }
 
-impl<'tc> FromAst<'tc, ast::Cap> for CapabilityExpr<'tc> {
-    type Output = &'tc CapabilityExpr<'tc>;
-
-    fn from_ast(ast: &Cap, type_context: &'tc TypeContext<'tc>) -> Result<Self::Output, TypeError> {
-        Ok(type_context.intern_cap_expr(match &ast.kind {
-            CapKind::CapRef(cap) => CapabilityExpr::Cap(
-                type_context
-                    .lookup_cap_decl(cap.name)
-                    .ok_or_else(|| format!("unknown capability: {}", cap.name))?,
-            ),
-            CapKind::And(lhs, rhs) => {
-                let lhs = CapabilityExpr::from_ast(lhs, type_context)?;
-                let rhs = CapabilityExpr::from_ast(rhs, type_context)?;
-                CapabilityExpr::And(lhs, rhs)
-            }
-            CapKind::Or(lhs, rhs) => {
-                let lhs = CapabilityExpr::from_ast(lhs, type_context)?;
-                let rhs = CapabilityExpr::from_ast(rhs, type_context)?;
-                CapabilityExpr::Or(lhs, rhs)
-            }
-        }))
-    }
-}
-
 impl Display for CapabilityExpr<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         use CapabilityExpr::*;
@@ -76,72 +47,14 @@ impl Display for CapabilityExpr<'_> {
     }
 }
 
-impl Assignable for CapabilityDeclaration {
-    fn assignable(from: &Self, to: &Self) -> AssignabilityJudgment {
-        if from == to {
-            return AssignabilityJudgment::Assignable;
-        }
-
-        AssignabilityJudgment::not_assignable(format!("{} != {}", from, to))
-    }
-}
-
-impl Assignable for CapabilityExpr<'_> {
-    fn assignable(from: &Self, to: &Self) -> AssignabilityJudgment {
-        use CapabilityExpr::*;
-        if from == to {
-            return AssignabilityJudgment::Assignable;
-        }
-        use crate::type_check;
-        match (from, to) {
-            (Cap(from_cd), Cap(to_cd)) => from_cd.assignable_to(to_cd),
-            (Cap(from_cd), And(lhs, rhs)) => AssignabilityJudgment::not_assignable(format!(
-                "{} can't be both {} and {}",
-                from_cd, lhs, rhs
-            )),
-            (And(from_lhs, from_rhs), And(to_lhs, to_rhs)) => {
-                type_check::check_assign_and(*from_lhs, *to_lhs, *from_rhs, *to_rhs, |_| {
-                    AssignabilityJudgment::not_assignable("".to_owned())
-                })
-                .or(|| {
-                    type_check::check_assign_and(*from_lhs, *to_rhs, *from_rhs, *to_lhs, |reason| {
-                        reason.to_owned()
-                    })
-                })
-            }
-            (And(lhs, rhs), _) => {
-                type_check::check_assign_or(*lhs, to, *rhs, to, |lhs_reason, rhs_reason| {
-                    AssignabilityJudgment::not_assignable(format!(
-                        "{} is not assignable to {}, because {} and {}",
-                        from, to, lhs_reason, rhs_reason
-                    ))
-                })
-            }
-            (Or(lhs, rhs), _) => type_check::check_assign_and(*lhs, to, *rhs, to, |reason| {
-                AssignabilityJudgment::not_assignable(format!(
-                    "{} is not assignable to {}, because {}",
-                    from, to, reason
-                ))
-            }),
-            (_, Or(lhs, rhs)) => {
-                type_check::check_assign_or(from, lhs, from, rhs, |lhs_reason, rhs_reason| {
-                    AssignabilityJudgment::not_assignable(format!(
-                        "{} is not assignable to {} | {}; not assignable because {} and {}",
-                        from, lhs, rhs, lhs_reason, rhs_reason
-                    ))
-                })
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::capabilities::CapabilityDeclaration;
+    use crate::ty::capabilities::CapabilityDeclaration;
+    use crate::typecheck::assignable::*;
+    use crate::typecheck::test_utils::*;
+    use crate::typecheck::{Arenas, TypeContext};
 
     use super::*;
-    use crate::type_check::test_utils::*;
-    use crate::type_check::{Arenas, TypeContext};
 
     macro_rules! with_fixture {
         ($fix:ident, $body:block) => {

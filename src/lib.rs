@@ -2,13 +2,10 @@
 #![allow(dead_code)]
 
 mod ast;
-mod capabilities;
-#[macro_use]
-mod symbol_table;
-mod func_decls;
+mod ast_to_ty;
+mod data_structures;
 mod ty;
-mod type_check;
-mod type_constructors;
+mod typecheck;
 
 // use std::collections::HashMap;
 // use std::marker::PhantomData;

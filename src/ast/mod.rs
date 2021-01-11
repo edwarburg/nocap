@@ -4,7 +4,7 @@ use std::ops::Deref;
 
 use bumpalo::core_alloc::fmt::Formatter;
 
-use crate::type_check::Name;
+use crate::typecheck::Name;
 
 ////////////////////////////////////////////////
 //                  Shared                    //

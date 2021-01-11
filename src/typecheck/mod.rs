@@ -1,22 +1,23 @@
-use std::fmt;
-use std::fmt::{Display, Formatter};
-
-use crate::capabilities::{CapabilityDeclaration, CapabilityExpr};
-use crate::symbol_table::{Opacity, SymbolTable};
-use crate::{ast, capabilities};
-
-use crate::ast::R;
-use crate::func_decls::FunctionDeclaration;
-use crate::ty::{FromAst, Ty};
-use crate::type_check::AssignabilityJudgment::NotAssignable;
-use crate::type_constructors::TypeConstructor;
-use bumpalo::Bump;
-use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::fmt::Display;
 use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::Mutex;
 
+use bumpalo::Bump;
+use itertools::Itertools;
+
+use crate::ast;
+use crate::ast::R;
+use crate::ast_to_ty::FromAst;
+use crate::data_structures::symbol_table::Opacity;
+use crate::data_structures::symbol_table::SymbolTable;
+use crate::ty;
+
+pub mod assignable;
+use assignable::AssignabilityJudgment;
+use assignable::CheckAssignable;
 // TODO definitely gonna need to change this at some point...
 pub type Name = &'static str;
 
@@ -37,45 +38,48 @@ impl<'tc> TypeContext<'tc> {
 
     pub(crate) fn intern_type_constructor(
         &'tc self,
-        type_constructor: TypeConstructor,
-    ) -> &'tc TypeConstructor {
+        type_constructor: ty::TypeConstructor,
+    ) -> &'tc ty::TypeConstructor {
         self.interners.type_constructors.intern(type_constructor)
     }
 
-    pub(crate) fn lookup_type_constructor(&self, name: Name) -> Option<&TypeConstructor> {
+    pub(crate) fn lookup_type_constructor(&self, name: Name) -> Option<&ty::TypeConstructor> {
         self.interners.type_constructors.lookup(name)
     }
 
     pub(crate) fn intern_cap_decl(
         &'tc self,
-        cap_decl: CapabilityDeclaration,
-    ) -> &'tc CapabilityDeclaration {
+        cap_decl: ty::CapabilityDeclaration,
+    ) -> &'tc ty::CapabilityDeclaration {
         self.interners.capability_declarations.intern(cap_decl)
     }
 
-    pub(crate) fn lookup_cap_decl(&self, name: Name) -> Option<&CapabilityDeclaration> {
+    pub(crate) fn lookup_cap_decl(&self, name: Name) -> Option<&ty::CapabilityDeclaration> {
         self.interners.capability_declarations.lookup(name)
     }
 
     pub(crate) fn intern_cap_expr(
         &'tc self,
-        cap_expr: CapabilityExpr<'tc>,
-    ) -> &'tc CapabilityExpr<'tc> {
+        cap_expr: ty::CapabilityExpr<'tc>,
+    ) -> &'tc ty::CapabilityExpr<'tc> {
         self.interners.capability_expressions.intern(cap_expr)
     }
 
-    pub(crate) fn intern_ty(&'tc self, ty: Ty<'tc>) -> &'tc Ty<'tc> {
+    pub(crate) fn intern_ty(&'tc self, ty: ty::Ty<'tc>) -> &'tc ty::Ty<'tc> {
         self.interners.tys.intern(ty)
     }
 
     pub(crate) fn intern_func_decl(
         &'tc self,
-        func_decl: FunctionDeclaration<'tc>,
-    ) -> &'tc FunctionDeclaration<'tc> {
+        func_decl: ty::FunctionDeclaration<'tc>,
+    ) -> &'tc ty::FunctionDeclaration<'tc> {
         self.interners.func_decls.intern(func_decl)
     }
 
-    pub(crate) fn lookup_func_decl(&'tc self, name: Name) -> Option<&'tc FunctionDeclaration<'tc>> {
+    pub(crate) fn lookup_func_decl(
+        &'tc self,
+        name: Name,
+    ) -> Option<&'tc ty::FunctionDeclaration<'tc>> {
         self.interners.func_decls.lookup(name)
     }
 }
@@ -90,11 +94,11 @@ pub struct Arenas {
 }
 
 struct Interners<'tc> {
-    type_constructors: InternedById<'tc, Name, TypeConstructor>,
-    capability_declarations: InternedById<'tc, Name, CapabilityDeclaration>,
-    capability_expressions: InternedBySet<'tc, CapabilityExpr<'tc>>,
-    tys: InternedBySet<'tc, Ty<'tc>>,
-    func_decls: InternedById<'tc, Name, FunctionDeclaration<'tc>>,
+    type_constructors: InternedById<'tc, Name, ty::TypeConstructor>,
+    capability_declarations: InternedById<'tc, Name, ty::CapabilityDeclaration>,
+    capability_expressions: InternedBySet<'tc, ty::CapabilityExpr<'tc>>,
+    tys: InternedBySet<'tc, ty::Ty<'tc>>,
+    func_decls: InternedById<'tc, Name, ty::FunctionDeclaration<'tc>>,
 }
 
 impl<'tc> Interners<'tc> {
@@ -170,116 +174,6 @@ impl<'a, T: Eq + Hash> InternedBySet<'a, T> {
     }
 }
 
-pub(crate) trait Assignable
-where
-    Self: Display,
-{
-    // TODO some type context parameter probably needs to be threaded through here
-    fn assignable(from: &Self, to: &Self) -> AssignabilityJudgment;
-
-    fn assignable_to(&self, to: &Self) -> AssignabilityJudgment {
-        Assignable::assignable(self, to)
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
-pub(crate) enum AssignabilityJudgment {
-    Assignable,
-    NotAssignable { reason: String },
-}
-
-impl AssignabilityJudgment {
-    pub(crate) fn and<F>(&self, next: F) -> AssignabilityJudgment
-    where
-        F: Fn() -> AssignabilityJudgment,
-    {
-        use AssignabilityJudgment::*;
-        match self {
-            Assignable => next(),
-            not_assignable => not_assignable.to_owned(),
-        }
-    }
-
-    pub(crate) fn or<F>(&self, next: F) -> AssignabilityJudgment
-    where
-        F: Fn() -> AssignabilityJudgment,
-    {
-        use AssignabilityJudgment::*;
-        match self {
-            Assignable => Assignable,
-            _ => next(),
-        }
-    }
-}
-
-impl Display for AssignabilityJudgment {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                AssignabilityJudgment::Assignable => "assignable",
-                NotAssignable { reason } => reason.as_str(),
-            }
-        )
-    }
-}
-
-impl AssignabilityJudgment {
-    pub(crate) fn not_assignable(reason: String) -> AssignabilityJudgment {
-        NotAssignable { reason }
-    }
-
-    pub(crate) fn is_assignable(&self) -> bool {
-        match self {
-            AssignabilityJudgment::Assignable => true,
-            _ => false,
-        }
-    }
-}
-
-pub(crate) fn check_assign_or<A, F>(
-    from1: &A,
-    to1: &A,
-    from2: &A,
-    to2: &A,
-    on_fail: F,
-) -> AssignabilityJudgment
-where
-    A: Assignable,
-    F: Fn(&AssignabilityJudgment, &AssignabilityJudgment) -> AssignabilityJudgment,
-{
-    use AssignabilityJudgment::*;
-    match from1.assignable_to(to1) {
-        Assignable => Assignable,
-        lhs_not_assn => match from2.assignable_to(to2) {
-            Assignable => Assignable,
-            rhs_not_assn => on_fail(&lhs_not_assn, &rhs_not_assn),
-        },
-    }
-}
-
-pub(crate) fn check_assign_and<A, F>(
-    from1: &A,
-    to1: &A,
-    from2: &A,
-    to2: &A,
-    on_fail: F,
-) -> AssignabilityJudgment
-where
-    A: Assignable,
-    F: Fn(&AssignabilityJudgment) -> AssignabilityJudgment,
-{
-    use AssignabilityJudgment::*;
-    match from1.assignable_to(to1) {
-        Assignable => match from2.assignable_to(to2) {
-            Assignable => Assignable,
-            not_assignable => on_fail(&not_assignable),
-        },
-        not_assignable => on_fail(&not_assignable),
-    }
-}
-
 // TODO real error reporting
 pub type TypeError = String;
 
@@ -310,14 +204,14 @@ pub type TypeError = String;
 /// like `WellTyped((), { foo: Foo<>[A, B] })` which contains the result type of the expression `()`,
 /// and a new environment reflecting the refined type of `foo`.
 pub enum TypingJudgment<'tc> {
-    WellTyped(&'tc Ty<'tc>, Env<'tc>),
+    WellTyped(&'tc ty::Ty<'tc>, Env<'tc>),
     // TODO ty to use for error recovery?
     TypeError(TypeError, Env<'tc>),
 }
 
 /// Convert a TypingJudgment into a Result, discarding the environment.
-impl<'tc> Into<Result<&'tc Ty<'tc>, TypeError>> for TypingJudgment<'tc> {
-    fn into(self) -> Result<&'tc Ty<'tc>, TypeError> {
+impl<'tc> Into<Result<&'tc ty::Ty<'tc>, TypeError>> for TypingJudgment<'tc> {
+    fn into(self) -> Result<&'tc ty::Ty<'tc>, TypeError> {
         match self {
             TypingJudgment::WellTyped(ty, _env) => Ok(ty),
             TypingJudgment::TypeError(reason, _env) => Err(reason),
@@ -343,7 +237,7 @@ impl<'tc> TypingJudgment<'tc> {
     /// `and_then` is essentially `>>=`, making `TypingJudgment` behave almost like a State monad over the environment.
     pub fn and_then<F>(self, mut action: F) -> TypingJudgment<'tc>
     where
-        F: FnMut(&'tc Ty<'tc>, Env<'tc>) -> TypingJudgment<'tc>,
+        F: FnMut(&'tc ty::Ty<'tc>, Env<'tc>) -> TypingJudgment<'tc>,
     {
         match self {
             TypingJudgment::WellTyped(ty, env) => action(ty, env),
@@ -516,10 +410,10 @@ impl<'tc> TypeChecker<'tc> {
     ) -> TypingJudgment<'tc> {
         let decl = ty_try!(
             Rc::new(Environment::new()),
-            FunctionDeclaration::from_ast(func_sig, self.type_context)
+            ty::FunctionDeclaration::from_ast(func_sig, self.type_context)
         );
-        self.type_context.intern_ty(Ty::Func(decl.ty.clone()));
-        TypingJudgment::WellTyped(&Ty::Unit, Rc::new(Environment::new()))
+        self.type_context.intern_ty(ty::Ty::Func(decl.ty.clone()));
+        TypingJudgment::WellTyped(&ty::Ty::Unit, Rc::new(Environment::new()))
     }
 
     fn check_cap_decl_and_intern(
@@ -527,24 +421,24 @@ impl<'tc> TypeChecker<'tc> {
         cap_decl: &ast::CapabilityDeclaration,
     ) -> TypingJudgment<'tc> {
         self.type_context
-            .intern_cap_decl(capabilities::CapabilityDeclaration {
+            .intern_cap_decl(ty::CapabilityDeclaration {
                 name: cap_decl.name,
             });
 
-        TypingJudgment::WellTyped(&Ty::Unit, Rc::new(Environment::new()))
+        TypingJudgment::WellTyped(&ty::Ty::Unit, Rc::new(Environment::new()))
     }
 
     fn check_struct_decl_and_intern(
         &mut self,
         struct_decl: &ast::StructDeclaration,
     ) -> TypingJudgment<'tc> {
-        use crate::type_constructors::*;
-        self.type_context.intern_type_constructor(TypeConstructor {
-            name: struct_decl.name,
-            type_parameters: vec![],
-        });
+        self.type_context
+            .intern_type_constructor(ty::TypeConstructor {
+                name: struct_decl.name,
+                type_parameters: vec![],
+            });
 
-        TypingJudgment::WellTyped(&Ty::Unit, Rc::new(Environment::new()))
+        TypingJudgment::WellTyped(&ty::Ty::Unit, Rc::new(Environment::new()))
     }
 
     fn check_func_impl(
@@ -564,6 +458,30 @@ impl<'tc> TypeChecker<'tc> {
         }
     }
 
+    fn check_var_decl(
+        &mut self,
+        lhs: &ast::Ident,
+        ty: &ast::Ty,
+        rhs: &ast::Expr,
+        env: Env<'tc>,
+    ) -> TypingJudgment<'tc> {
+        self.check_expr(rhs, env).and_then(|rhs_ty, env| {
+            let ty = ty_try!(env, ty::Ty::from_ast(ty, self.type_context));
+            if let AssignabilityJudgment::NotAssignable { reason } = rhs_ty.assignable_to(ty) {
+                return TypingJudgment::TypeError(reason, env);
+            }
+            self.local_context.symbols.bind(
+                lhs.name,
+                ScopedVar {
+                    name: lhs.name,
+                    depth: self.local_context.symbols.depth(),
+                },
+            );
+            let new_env = env.refine(self.local_context.symbols.lookup(&lhs.name).unwrap(), ty);
+            TypingJudgment::WellTyped(ty, new_env)
+        })
+    }
+
     fn check_expr(&mut self, expr: &ast::Expr, env: Env<'tc>) -> TypingJudgment<'tc> {
         use crate::ast::*;
         match &expr.kind {
@@ -573,6 +491,31 @@ impl<'tc> TypeChecker<'tc> {
                 self.check_invoke(func_ident, actual_args, type_args, env)
             }
         }
+    }
+
+    fn check_block(
+        &mut self,
+        stmts: &Vec<R<ast::Stmt>>,
+        expr: &R<ast::Expr>,
+        env: Env<'tc>,
+    ) -> TypingJudgment<'tc> {
+        let outer_env = env.clone();
+        let mut curr_env = env.clone();
+        let block_tj = with_frame!(&mut self.local_context.symbols, Opacity::Transparent, {
+            for stmt in stmts.iter() {
+                tj_try!(self.check_stmt(stmt, curr_env.clone()), _ty, next_env, {
+                    curr_env = next_env.clone();
+                });
+            }
+            self.check_expr(expr, curr_env.clone())
+        });
+        tj_try!(block_tj, last_expr_ty, last_expr_env, {
+            let outgoing_env = last_expr_env.preserving_refinements_of_outer_vars(
+                outer_env.clone(),
+                self.local_context.symbols.depth(),
+            );
+            TypingJudgment::WellTyped(last_expr_ty, outgoing_env)
+        })
     }
 
     fn check_invoke(
@@ -589,7 +532,7 @@ impl<'tc> TypeChecker<'tc> {
             if actual_num_args != expected_num_args {
                 return TypingJudgment::TypeError(format!("Wrong number of args for invocation of function {}: expected {}, actual {}", func_ident.name, expected_num_args, actual_num_args), env.clone());
             }
-            let mut last_tj = TypingJudgment::WellTyped(&Ty::Bottom, env.clone());
+            let mut last_tj = TypingJudgment::WellTyped(&ty::Ty::Bottom, env.clone());
             for (formal, actual) in func_decl.ty.formal_args.iter().zip(actual_args.iter()) {
                 let env = last_tj.env();
                 let tj = self.check_expr(actual, env);
@@ -665,7 +608,7 @@ impl<'tc> TypeChecker<'tc> {
             .map_or_else(
                 || {
                     // TODO just for tests, return bottom type for unknown variable references
-                    TypingJudgment::WellTyped(&Ty::Bottom, env.clone())
+                    TypingJudgment::WellTyped(&ty::Ty::Bottom, env.clone())
                     // TypingJudgment::TypeError(
                     //     format!("variable not in scope: {}", ident.name),
                     //     env.clone(),
@@ -673,55 +616,6 @@ impl<'tc> TypeChecker<'tc> {
                 },
                 |ty| TypingJudgment::WellTyped(ty, env.clone()),
             )
-    }
-
-    fn check_var_decl(
-        &mut self,
-        lhs: &ast::Ident,
-        ty: &ast::Ty,
-        rhs: &ast::Expr,
-        env: Env<'tc>,
-    ) -> TypingJudgment<'tc> {
-        self.check_expr(rhs, env).and_then(|rhs_ty, env| {
-            let ty = ty_try!(env, Ty::from_ast(ty, self.type_context));
-            if let NotAssignable { reason } = rhs_ty.assignable_to(ty) {
-                return TypingJudgment::TypeError(reason, env);
-            }
-            self.local_context.symbols.bind(
-                lhs.name,
-                ScopedVar {
-                    name: lhs.name,
-                    depth: self.local_context.symbols.depth(),
-                },
-            );
-            let new_env = env.refine(self.local_context.symbols.lookup(&lhs.name).unwrap(), ty);
-            TypingJudgment::WellTyped(ty, new_env)
-        })
-    }
-
-    fn check_block(
-        &mut self,
-        stmts: &Vec<R<ast::Stmt>>,
-        expr: &R<ast::Expr>,
-        env: Env<'tc>,
-    ) -> TypingJudgment<'tc> {
-        let outer_env = env.clone();
-        let mut curr_env = env.clone();
-        let block_tj = with_frame!(&mut self.local_context.symbols, Opacity::Transparent, {
-            for stmt in stmts.iter() {
-                tj_try!(self.check_stmt(stmt, curr_env.clone()), _ty, next_env, {
-                    curr_env = next_env.clone();
-                });
-            }
-            self.check_expr(expr, curr_env.clone())
-        });
-        tj_try!(block_tj, last_expr_ty, last_expr_env, {
-            let outgoing_env = last_expr_env.preserving_refinements_of_outer_vars(
-                outer_env.clone(),
-                self.local_context.symbols.depth(),
-            );
-            TypingJudgment::WellTyped(last_expr_ty, outgoing_env)
-        })
     }
 }
 
@@ -749,7 +643,7 @@ struct ScopedVar {
     depth: usize,
 }
 
-type Refinements<'tc> = HashMap<ScopedVar, &'tc Ty<'tc>>;
+type Refinements<'tc> = HashMap<ScopedVar, &'tc ty::Ty<'tc>>;
 
 /// A linked list of frames which refine the type of variables.
 /// TODO this could certainly be made a lot more efficient, going for ease of use to start
@@ -767,7 +661,7 @@ impl<'tc> Environment<'tc> {
         }
     }
 
-    fn refine(self: Rc<Environment<'tc>>, var: &ScopedVar, ty: &'tc Ty<'tc>) -> Env<'tc> {
+    fn refine(self: Rc<Environment<'tc>>, var: &ScopedVar, ty: &'tc ty::Ty<'tc>) -> Env<'tc> {
         let mut map = Refinements::with_capacity(1);
         map.insert(*var, ty);
         self.refine_map(map)
@@ -780,7 +674,7 @@ impl<'tc> Environment<'tc> {
         })
     }
 
-    fn lookup(self: &Env<'tc>, var: &ScopedVar) -> Option<&'tc Ty<'tc>> {
+    fn lookup(self: &Env<'tc>, var: &ScopedVar) -> Option<&'tc ty::Ty<'tc>> {
         if let Some(ty) = self.refinements.get(var) {
             Some(ty)
         } else if let Some(prev) = &self.previous {
@@ -819,9 +713,9 @@ impl<'tc> Environment<'tc> {
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use crate::type_check::{AssignabilityJudgment, Assignable};
+    use crate::typecheck::assignable::{AssignabilityJudgment, CheckAssignable};
 
-    pub(crate) fn assert_assignable_to<T: Assignable>(lhs: &T, rhs: &T) {
+    pub(crate) fn assert_assignable_to<T: CheckAssignable>(lhs: &T, rhs: &T) {
         match lhs.assignable_to(rhs) {
             AssignabilityJudgment::Assignable => return,
             AssignabilityJudgment::NotAssignable { reason } => {
@@ -833,7 +727,7 @@ pub(crate) mod test_utils {
         }
     }
 
-    pub(crate) fn assert_not_assignable_to<T: Assignable>(lhs: &T, rhs: &T) {
+    pub(crate) fn assert_not_assignable_to<T: CheckAssignable>(lhs: &T, rhs: &T) {
         match lhs.assignable_to(rhs) {
             AssignabilityJudgment::NotAssignable { .. } => return,
             AssignabilityJudgment::Assignable => {
@@ -848,10 +742,10 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast;
-
-    use crate::type_check::*;
     use itertools::Itertools;
+
+    use crate::ast;
+    use crate::typecheck::*;
 
     #[test]
     fn test_invoke_adds_cap() {
