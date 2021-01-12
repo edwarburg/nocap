@@ -9,15 +9,17 @@ use bumpalo::Bump;
 use itertools::Itertools;
 
 use crate::ast;
-use crate::ast::R;
+use crate::ast::{LiteralKind, R};
 use crate::ast_to_ty::FromAst;
 use crate::data_structures::symbol_table::Opacity;
 use crate::data_structures::symbol_table::SymbolTable;
 use crate::ty;
 
 pub mod assignable;
+use crate::ty::TypeConstructorInvocation;
 use assignable::AssignabilityJudgment;
 use assignable::CheckAssignable;
+
 // TODO definitely gonna need to change this at some point...
 pub type Name = &'static str;
 
@@ -490,7 +492,24 @@ impl<'tc> TypeChecker<'tc> {
             ExprKind::Invoke(func_ident, actual_args, type_args) => {
                 self.check_invoke(func_ident, actual_args, type_args, env)
             }
+            ExprKind::Literal(lit_kind) => self.check_literal(lit_kind, env),
         }
+    }
+
+    fn check_var_ref(&mut self, ident: &ast::Ident, env: Env<'tc>) -> TypingJudgment<'tc> {
+        self.local_context
+            .symbols
+            .lookup(&ident.name)
+            .and_then(|var| env.lookup(var))
+            .map_or_else(
+                || {
+                    TypingJudgment::TypeError(
+                        format!("variable not in scope: {}", ident.name),
+                        env.clone(),
+                    )
+                },
+                |ty| TypingJudgment::WellTyped(ty, env.clone()),
+            )
     }
 
     fn check_block(
@@ -600,22 +619,31 @@ impl<'tc> TypeChecker<'tc> {
         }
     }
 
-    fn check_var_ref(&mut self, ident: &ast::Ident, env: Env<'tc>) -> TypingJudgment<'tc> {
-        self.local_context
-            .symbols
-            .lookup(&ident.name)
-            .and_then(|var| env.lookup(var))
-            .map_or_else(
-                || {
-                    // TODO just for tests, return bottom type for unknown variable references
-                    TypingJudgment::WellTyped(&ty::Ty::Bottom, env.clone())
-                    // TypingJudgment::TypeError(
-                    //     format!("variable not in scope: {}", ident.name),
-                    //     env.clone(),
-                    // )
-                },
-                |ty| TypingJudgment::WellTyped(ty, env.clone()),
-            )
+    fn check_literal(&mut self, lit_kind: &ast::LiteralKind, env: Env<'tc>) -> TypingJudgment<'tc> {
+        match lit_kind {
+            LiteralKind::BottomLit => TypingJudgment::WellTyped(&ty::Ty::Bottom, env.clone()),
+            LiteralKind::UnitLit => TypingJudgment::WellTyped(&ty::Ty::Unit, env.clone()),
+            LiteralKind::StructLit(struct_lit) => {
+                let struct_decl = self.type_context.lookup_type_constructor(struct_lit.name);
+                match struct_decl {
+                    Some(tc) => {
+                        let tci = self.type_context.intern_ty(ty::Ty::TyConInv(
+                            ty::TypeConstructorInvocation {
+                                constructor: tc,
+                                type_parameter_bindings: vec![],
+                                capabilities: None,
+                            },
+                        ));
+                        TypingJudgment::WellTyped(tci, env.clone())
+                    }
+                    None => TypingJudgment::TypeError(
+                        format!("No such struct: {}", struct_lit.name),
+                        env.clone(),
+                    ),
+                }
+                // TODO check field assignments
+            }
+        }
     }
 }
 
@@ -767,8 +795,8 @@ mod tests {
                     // bar(a);
                     // bar(b) // in my bar(b) world
                     (block
-                        [(let a [(ty Foo)] _a)
-                         (let b [(ty Foo)] _b)
+                        [(let a [(ty Foo)] (lit_struct Foo []))
+                         (let b [(ty Foo)] (lit_struct Foo []))
                          (stmt (invoke foo a))
                          // should succeed since `a` gained `Blah` after invoking `foo`
                          (stmt (invoke bar a))]
@@ -776,9 +804,8 @@ mod tests {
                         (invoke bar b))))
         };
 
-        // set up environment: there's a type named `Foo` with no type vars, and `b` is whatever type we need it to be (ie, bottom).
-        let areans = Arenas::default();
-        let tc = TypeContext::new(&areans);
+        let arenas = Arenas::default();
+        let tc = TypeContext::new(&arenas);
 
         // type check the file with the given env
         let local_context = LocalContext::default();

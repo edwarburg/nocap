@@ -241,6 +241,8 @@ pub enum ExprKind {
     Block(Vec<R<Stmt>>, R<Expr>),
     /// function invocation. `foo()`, `foo<A>(a, b)`, etc
     Invoke(Ident, Vec<R<Expr>>, Vec<R<Ty>>),
+    /// all sorts of literals. structs, numbers, bools, strings, etc
+    Literal(LiteralKind)
 }
 
 node_impls!(Expr, ExprKind);
@@ -265,6 +267,22 @@ impl Into<Ident> for Name {
 #[derive(Debug)]
 pub enum LVal {
     Variable(Ident),
+}
+
+#[derive(Debug)]
+pub enum LiteralKind {
+    /// literal expression whose type is ty::Ty::Bottom. Not syntactically representable, but may be emitted by the compilers.
+    BottomLit,
+    /// literal expression whose type is ty::Ty::Unit, ie, ()
+    UnitLit,
+    /// struct constructor, eg Foo { bar: blah }
+    StructLit(StructLiteral)
+}
+
+#[derive(Debug)]
+pub struct StructLiteral {
+    pub(crate) name: Name,
+    // TODO field initializers
 }
 
 ////////////////////////////////////////////////
@@ -409,10 +427,6 @@ pub(crate) mod test_utils {
             ast!($rhs),
         ).into()
     }};
-    ($var:ident) => {{
-        use crate::ast;
-        ast::ExprKind::VarRef(stringify!($var).into()).into()
-    }};
     ((block [$($body:tt)*] $expr:tt)) => {{
         use crate::ast;
         ast::ExprKind::Block(vec![$(ast!($body)),*], ast!($expr)).into()
@@ -420,6 +434,24 @@ pub(crate) mod test_utils {
     ((invoke $fun:ident $($args:tt)*)) => {{
         use crate::ast;
         ast::ExprKind::Invoke(stringify!($fun).into(), vec![$(ast!($args)),*], vec![]).into()
+    }};
+    ((lit_struct $name:ident [])) => {{
+        use crate::ast;
+        ast::ExprKind::Literal(ast::LiteralKind::StructLit(ast::StructLiteral {
+            name: stringify!($name).into()
+        })).into()
+    }};
+    (lit_bottom) => {{
+        use crate::ast;
+        ast::ExprKind::Literal(ast::LiteralKind::BottomLit).into()
+    }};
+    (lit_unit) => {{
+        use crate::ast;
+        ast::ExprKind::Literal(ast::LiteralKind::UnitLit).into()
+    }};
+    ($var:ident) => {{
+        use crate::ast;
+        ast::ExprKind::VarRef(stringify!($var).into()).into()
     }};
 
     // Ty
